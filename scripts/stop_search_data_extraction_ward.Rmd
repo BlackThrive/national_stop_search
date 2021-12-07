@@ -1,0 +1,1432 @@
+---
+title: "Untitled"
+author: "Jolyon Miles-Wilson"
+date: "22/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Packages
+```{r}
+packages <- c('tidyverse',
+              'jsonify', # for reading json
+              'leaflet', # for map
+              'httr', # for http requests
+              'data.table', # for unlisting
+              'rgdal', # for geopackage
+              'sf' # for geopackage
+)
+pkg_notinstall <- packages[!(packages %in% installed.packages()[,"Package"])]
+lapply(pkg_notinstall, install.packages, dependencies = TRUE)
+lapply(packages, library, character.only = TRUE)
+```
+
+```{r post_function}
+# Acquire stop and search data in an area for a time period
+
+# area_coords: area of interest. Must be a data frame with column names "lat" and "long" 
+
+# most_recent_month: numeric value specifying most recent month (e.g. 8 for August)
+
+# most_recent_year (YYYY): numeric value specifying most recenet year (e.g. 2021)
+
+# num_months_backwards: number of months backwards for which data are required. 
+# Default = 12. For example, if the most recent year of data is required, 
+# num_months_backwards would be 12
+
+# If most_recent_month/year is not specified, function will query Police API for
+# most recent update and use this as a start point
+
+retrieve_area_data <- function(area_coords, most_recent_month = NULL, most_recent_year = NULL, num_months_backwards = 12){
+  output <- data.frame() # initialise dataframe
+  
+  # make coordinate string for POST request
+  coord_string <- c()
+  for(i in 1:nrow(area_coords)){
+    if(i == 1){
+      coord_string <- paste(area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+    }else{
+    coord_string <- paste(coord_string,":",area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+  }
+  }
+  # get most recent update if most_recent data not specified
+  if(is.null(most_recent_month) || is.null(most_recent_year)){ 
+    date <- httr::content(httr::GET("https://data.police.uk/api/crimes-street-dates"))[[1]][["date"]] # get most recent update
+    most_recent_month <- as.numeric(substr(date,6,7))
+    most_recent_year <- as.numeric(substr(date,1,4))
+  }
+  else{
+    most_recent_month <- most_recent_month
+    most_recent_year <- most_recent_year
+  }
+  
+  # specify formatted date
+  for(i in 1:num_months_backwards){
+    if(i == 1){ # set values for first iteration
+      month_num <- most_recent_month
+      year <- most_recent_year
+    }
+    else{ # subsequent iterations
+      month_num <- month_num - 1 # backwards a month each iteration
+      if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+        month_num <- 12
+        year <- year - 1 # backwards a year
+      }
+    }
+    if(month_num < 10){ # paste 0 for months lower than 10
+      month <- paste("0", month_num, sep = "")
+    }
+    else{
+      month <- month_num
+    }
+    
+    date <- paste(year, "-", month, sep = "") # combine dates into format for api
+    body <- list("poly" = coord_string,
+                 "date" = date)
+    post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body) # POST request
+    df <- httr::content(post_request) # get content from response
+    df_2 <- data.frame(t(sapply(df,c))) # convert to df
+    output <- rbind(output, df_2) # add to dataframe
+    print(paste("Working... ", i, " of ", num_months_backwards, " retrieved", sep = ""))
+    print(date)
+  }
+  # unlist remaining listed columns. Not ideal solution but will have to do for now
+  output <- output %>%
+    unnest_wider(., outcome_object, names_sep = ".") %>%
+    unnest_wider(., location, names_sep = ".") %>%
+    unnest_wider(., location.street, names_sep = ".")
+  output <- as.matrix(output) # make matrix because write.csv runs into problems with list cols
+  return(output) # testing... change back to output
+}
+
+```
+
+# force - test
+```{r}
+k <- httr::content(httr::GET("https://data.police.uk/api/stops-force?force=avon-and-somerset&date=2020-01"))
+
+# keep only records that have a location
+keep <- list()
+for(i in 1:length(k)){
+  if(!is.null(k[[i]][["location"]])){
+    keep <- append(keep, list(k[[i]]))
+  }
+}
+
+k_2 <- data.frame(t(sapply(keep,c)))
+
+k_3 <- k_2 %>%
+    unnest_wider(., outcome_object, names_sep = ".") %>%
+    unnest_wider(., location, names_sep = ".") %>%
+    unnest_wider(., location.street, names_sep = ".")
+```
+
+```{r}
+body <- list("force" = "greater-manchester",
+           "date" = 2021-09)
+
+post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+df <- httr::content(post_request)
+is.null(df)
+```
+
+
+```{r}
+forces <- httr::content(httr::GET("https://data.police.uk/api/forces"))
+force_ids <- c()
+for(i in 1:length(forces)){
+  force_ids[i] <- forces[[i]][["id"]]
+}
+
+force_ids_2 <- force_ids[1:12]
+force_ids_3 <- force_ids[15]
+
+force_ids_4 <- force_ids[1:16]
+```
+
+```{r}
+retrieve_force_data <- function(force_ids, 
+                                max_tries = Inf, 
+                                wait_time = 5, 
+                                most_recent_month = NULL, 
+                                most_recent_year = NULL, 
+                                num_months_backwards = 12){
+  
+  output <- data.frame() # initialise dataframe
+  names <- c("date","force","issue") # names for no_record and server_error
+  no_record_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  server_error_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  
+  # get most recent update if most_recent data not specified
+  if(is.null(most_recent_month) || is.null(most_recent_year)){ 
+    date <- httr::content(httr::GET("https://data.police.uk/api/crimes-street-dates"))[[1]][["date"]] # get most recent update
+    most_recent_month <- as.numeric(substr(date,6,7))
+    most_recent_year <- as.numeric(substr(date,1,4))
+  }
+  else{
+    most_recent_month <- most_recent_month
+    most_recent_year <- most_recent_year
+  }
+  for(j in 1:length(force_ids)){
+      force_id <- force_ids[j]
+    # specify formatted date
+    for(i in 1:num_months_backwards){
+      if(i == 1){ # set values for first iteration
+        month_num <- most_recent_month
+        year <- most_recent_year
+      }
+      else{ # subsequent iterations
+        month_num <- month_num - 1 # backwards a month each iteration
+        if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+          month_num <- 12
+          year <- year - 1 # backwards a year
+        }
+      }
+      if(month_num < 10){ # paste 0 for months lower than 10
+        month <- paste("0", month_num, sep = "")
+      }
+      else{
+        month <- month_num
+      }
+    
+      date <- paste(year, "-", month, sep = "") # combine dates into format for api
+      body <- list("force" = force_id,
+                 "date" = date)
+      
+      post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+      
+      # keep trying post request if there is a server error
+      attempt <- 1 # initialise attempt
+      while(post_request[["status_code"]] != 200 && attempt <= max_tries){
+        print(paste0("Server error. Trying again (", attempt,")"))
+        Sys.sleep(wait_time) # wait some time before trying again
+        try(
+          post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+        )
+        attempt <- attempt + 1
+      }
+      
+      # if error resolved advise
+      if(attempt > 1 && post_request[["status_code"]] == 200){
+        print("Server error RESOLVED")
+        
+      }
+      # if error unresolved advise and skip to next iteration
+      else if(attempt > 1 && post_request[["status_code"]] != 200){
+        print("Server error UNRESOLVED")
+        if(is.na(server_error_df$date[1])){
+          server_error_df[1] <- c(date, force_id, paste0("Server error: ", post_request[["status_code"]]))
+        }
+        else{
+          server_error_df <- rbind(server_error_df, c(date, force_id, paste0("Server error: ", post_request[["status_code"]])))
+        }
+        next
+      }
+      
+      df <- httr::content(post_request) # get content from response
+      # if there is no record, make a note of it and skip to next iteration
+      if(length(df) == 0){
+        print("No record")
+        if(is.na(no_record_df$date[1])){ # for first time this happens
+          no_record_df[1,] <- c(date, force_id, "Record does not exist for this date/force combination")
+        }
+        else{
+          no_record_df <- rbind(no_record_df, c(date, force_id, "Record does not exist for this date/force combination")) # for subsequent times
+        }
+        next
+      }
+      
+      # drop records that don't have a location
+      keep <- list()
+      for(k in 1:length(df)){
+        if(!is.null(df[[k]][["location"]])){
+          keep <- append(keep, list(df[[k]]))
+        }
+      }
+      
+      df_2 <- data.frame(t(sapply(keep,c))) # convert to df
+      df_2$force <- force_id # add a force identifier
+      output <- rbind(output, df_2) # add to dataframe
+      
+      print(paste("Working... ", i, " of ", num_months_backwards, " months retrieved", sep = ""))
+      print(date)
+    }
+    cat("\014")
+    print(paste("Working... ", j, " of ", length(force_ids), " forces retrieved. ", round(100 * (j / length(force_ids)),0), "% complete.", sep = ""))
+    
+  }
+  # unlist remaining listed columns. Not ideal solution but will have to do for now
+  output <- output %>%
+    unnest_wider(., outcome_object, names_sep = ".") %>%
+    unnest_wider(., location, names_sep = ".") %>%
+    unnest_wider(., location.street, names_sep = ".")
+  output <- as.matrix(output) # make matrix because write.csv runs into problems with list cols
+  if(!is.na(no_record_df[1,1])){
+    print(paste0(nrow(no_record_df), " record(s) missing. See table for details."))
+    print(no_record_df)
+  }
+  if(!is.na(server_error_df[1,1])){
+    print(paste0(nrow(server_error_df), " server request(s) failed. See table for details."))
+    print(no_record_df)
+  }
+  return(output) # testing... change back to output
+  
+}
+
+#test <- retrieve_force_data(force_ids[1:22], num_months_backwards = 12)
+#test_2 <- retrieve_force_data(force_ids[23:26], num_months_backwards = 12)
+
+test_3 <- retrieve_force_data(force_ids[30], num_months_backwards = 2)
+test_4 <- retrieve_force_data(force_ids[31], num_months_backwards = 2)
+```
+
+```{r}
+body <- list("force" = "northumbria",
+           "date" = 2021-09)
+
+post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+df <- httr::content(post_request)
+is.null(df)
+
+```
+
+# current working function
+
+```{r}
+retrieve_force_data <- function(force_ids, 
+                                max_tries = Inf, 
+                                wait_time = 5, 
+                                most_recent_month = NULL, 
+                                most_recent_year = NULL, 
+                                num_months_backwards = 12){
+  
+  output <- data.frame() # initialise dataframe
+  names <- c("date","force","issue") # names for no_record and server_error
+  no_record_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  server_error_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  locations_missing_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  
+  # get most recent update if most_recent data not specified
+  if(is.null(most_recent_month) || is.null(most_recent_year)){ 
+    date <- httr::content(httr::GET("https://data.police.uk/api/crimes-street-dates"))[[1]][["date"]] # get most recent update
+    most_recent_month <- as.numeric(substr(date,6,7))
+    most_recent_year <- as.numeric(substr(date,1,4))
+  }
+  else{
+    most_recent_month <- most_recent_month
+    most_recent_year <- most_recent_year
+  }
+  for(j in 1:length(force_ids)){
+      force_id <- force_ids[j]
+    # specify formatted date
+    for(i in 1:num_months_backwards){
+      if(i == 1){ # set values for first iteration
+        month_num <- most_recent_month
+        year <- most_recent_year
+      }
+      else{ # subsequent iterations
+        month_num <- month_num - 1 # backwards a month each iteration
+        if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+          month_num <- 12
+          year <- year - 1 # backwards a year
+        }
+      }
+      if(month_num < 10){ # paste 0 for months lower than 10
+        month <- paste("0", month_num, sep = "")
+      }
+      else{
+        month <- month_num
+      }
+    
+      date <- paste(year, "-", month, sep = "") # combine dates into format for api
+      body <- list("force" = force_id,
+                 "date" = date)
+      
+      post_request <- post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+      
+      # keep trying post request if there is a server error
+      attempt <- 1 # initialise attempt
+      while(post_request[["status_code"]] != 200 && attempt <= max_tries){
+        print(paste0("Server error. Trying again (", attempt,")"))
+        Sys.sleep(wait_time) # wait some time before trying again
+        try(
+          post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+        )
+        attempt <- attempt + 1
+      }
+      
+      # if error resolved advise
+      if(attempt > 1 && post_request[["status_code"]] == 200){
+        print("Server error RESOLVED")
+        
+      }
+      # if error unresolved advise and skip to next iteration
+      else if(attempt > 1 && post_request[["status_code"]] != 200){
+        print("Server error UNRESOLVED")
+        if(is.na(server_error_df$date[1])){
+          server_error_df[1] <- c(date, force_id, paste0("Server error: ", post_request[["status_code"]]))
+        }
+        else{
+          server_error_df <- rbind(server_error_df, c(date, force_id, paste0("Server error: ", post_request[["status_code"]])))
+        }
+        next
+      }
+      
+      df <- httr::content(post_request) # get content from response
+      # if there is no record, make a note of it and skip to next iteration
+      if(length(df) == 0){
+        print("No record")
+        if(is.na(no_record_df$date[1])){ # for first time this happens
+          no_record_df[1,] <- c(date, force_id, "Record does not exist for this date/force combination")
+        }
+        else{
+          no_record_df <- rbind(no_record_df, c(date, force_id, "Record does not exist for this date/force combination")) # for subsequent times
+        }
+        next
+      }
+
+      # drop records that don't have a location
+      keep <- list()
+      for(k in 1:length(df)){
+        if(!is.null(df[[k]][["location"]])){
+          keep <- append(keep, list(df[[k]]))
+        }
+      }
+      
+      # if there are no entries with locations, skip to next record
+      if(is_empty(keep)){
+        print("Locations missing for all records")
+        if(is.na(locations_missing_df$date[1])){ # for first time this happens
+          locations_missing_df[1,] <- c(date, force_id, "Locations missing for all entries for this date/force combination")
+        }
+        else{
+          locations_missing_df <- rbind(locations_missing_df, c(date, force_id, "Locations missing for all entries for this date/force combination"))
+          }# for subsequent times
+        next
+      }
+      
+      df_2 <- data.frame(t(sapply(keep,c))) # convert to df
+      df_2$force <- force_id # add a force identifier
+      output <- rbind(output, df_2) # add to dataframe
+      
+      print(paste("Working... ", i, " of ", num_months_backwards, " months retrieved", sep = ""))
+      print(date)
+    }
+    cat("\014")
+    print(paste("Working... ", j, " of ", length(force_ids), " forces retrieved. ", round(100 * (j / length(force_ids)),0), "% complete.", sep = ""))
+    
+  }
+  if(!is_empty(output)){ # only run if records exist 
+    # unlist remaining listed columns. Not ideal solution but will have to do for now
+    output <- output %>%
+      unnest_wider(., outcome_object, names_sep = ".") %>%
+      unnest_wider(., location, names_sep = ".") %>%
+      unnest_wider(., location.street, names_sep = ".")
+    output <- as.matrix(output) # make matrix because write.csv runs into problems with list cols
+  }
+  if(!is.na(no_record_df[1,1])){
+    print(paste0(nrow(no_record_df), " record(s) missing. See table for details."))
+    print(no_record_df)
+  }
+  if(!is.na(server_error_df[1,1])){
+    print(paste0(nrow(server_error_df), " server request(s) failed. See table for details."))
+    print(no_record_df)
+  }
+  if(!is.na(locations_missing_df[1,1])){
+    print(paste0(nrow(locations_missing_df), " records have missing locations for all entries. See table for details."))
+    print(locations_missing_df)
+  }
+  return(output) # testing... change back to output
+  
+}
+
+#test <- retrieve_force_data(force_ids[1:22], num_months_backwards = 12)
+#test_2 <- retrieve_force_data(force_ids[23:26], num_months_backwards = 12)
+
+# test_3 <- retrieve_force_data(force_ids[30], num_months_backwards = 2)
+# test_4 <- retrieve_force_data(force_ids[32], num_months_backwards = 2)
+# test_5 <- retrieve_force_data(force_ids[31], num_months_backwards = 2)
+
+test <- retrieve_force_data(force_ids, num_months_backwards = 12)
+
+#write.csv(test, file = "../data/stop_search_national.csv")
+```
+
+# current working function - get (not faster)
+
+
+```{r}
+retrieve_force_data <- function(force_ids, 
+                                max_tries = Inf, 
+                                wait_time = 5, 
+                                most_recent_month = NULL, 
+                                most_recent_year = NULL, 
+                                num_months_backwards = 12){
+  
+  output <- data.frame() # initialise dataframe
+  names <- c("date","force","issue") # names for no_record and server_error
+  no_record_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  server_error_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  locations_missing_df <- data.frame(setNames(rep(list(NA), length(names)), names))
+  
+  # get most recent update if most_recent data not specified
+  if(is.null(most_recent_month) || is.null(most_recent_year)){ 
+    date <- httr::content(httr::GET("https://data.police.uk/api/crimes-street-dates"))[[1]][["date"]] # get most recent update
+    most_recent_month <- as.numeric(substr(date,6,7))
+    most_recent_year <- as.numeric(substr(date,1,4))
+  }
+  else{
+    most_recent_month <- most_recent_month
+    most_recent_year <- most_recent_year
+  }
+  for(j in 1:length(force_ids)){
+      force_id <- force_ids[j]
+    # specify formatted date
+    for(i in 1:num_months_backwards){
+      if(i == 1){ # set values for first iteration
+        month_num <- most_recent_month
+        year <- most_recent_year
+      }
+      else{ # subsequent iterations
+        month_num <- month_num - 1 # backwards a month each iteration
+        if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+          month_num <- 12
+          year <- year - 1 # backwards a year
+        }
+      }
+      if(month_num < 10){ # paste 0 for months lower than 10
+        month <- paste("0", month_num, sep = "")
+      }
+      else{
+        month <- month_num
+      }
+    
+      date <- paste(year, "-", month, sep = "") # combine dates into format for api
+      body <- list("force" = force_id,
+                 "date" = date)
+      
+      post_request <- httr::GET(paste0("https://data.police.uk/api/stops-force?force=",force_id,"&date=",date)) # POST request
+      
+      # keep trying post request if there is a server error
+      attempt <- 1 # initialise attempt
+      while(post_request[["status_code"]] != 200 && attempt <= max_tries){
+        print(paste0("Server error. Trying again (", attempt,")"))
+        Sys.sleep(wait_time) # wait some time before trying again
+        try(
+          post_request <- httr::GET(paste0("https://data.police.uk/api/stops-force?force=",force_id,"&date=",date)) # POST request
+        )
+        attempt <- attempt + 1
+      }
+      
+      # if error resolved advise
+      if(attempt > 1 && post_request[["status_code"]] == 200){
+        print("Server error RESOLVED")
+        
+      }
+      # if error unresolved advise and skip to next iteration
+      else if(attempt > 1 && post_request[["status_code"]] != 200){
+        print("Server error UNRESOLVED")
+        if(is.na(server_error_df$date[1])){
+          server_error_df[1] <- c(date, force_id, paste0("Server error: ", post_request[["status_code"]]))
+        }
+        else{
+          server_error_df <- rbind(server_error_df, c(date, force_id, paste0("Server error: ", post_request[["status_code"]])))
+        }
+        next
+      }
+      
+      df <- httr::content(post_request) # get content from response
+      # if there is no record, make a note of it and skip to next iteration
+      if(length(df) == 0){
+        print("No record")
+        if(is.na(no_record_df$date[1])){ # for first time this happens
+          no_record_df[1,] <- c(date, force_id, "Record does not exist for this date/force combination")
+        }
+        else{
+          no_record_df <- rbind(no_record_df, c(date, force_id, "Record does not exist for this date/force combination")) # for subsequent times
+        }
+        next
+      }
+
+      # drop records that don't have a location
+      keep <- list()
+      for(k in 1:length(df)){
+        if(!is.null(df[[k]][["location"]])){
+          keep <- append(keep, list(df[[k]]))
+        }
+      }
+      
+      # if there are no entries with locations, skip to next record
+      if(is_empty(keep)){
+        print("Locations missing for all records")
+        if(is.na(locations_missing_df$date[1])){ # for first time this happens
+          locations_missing_df[1,] <- c(date, force_id, "Locations missing for all entries for this date/force combination")
+        }
+        else{
+          locations_missing_df <- rbind(locations_missing_df, c(date, force_id, "Locations missing for all entries for this date/force combination"))
+          }# for subsequent times
+        next
+      }
+      
+      df_2 <- data.frame(t(sapply(keep,c))) # convert to df
+      df_2$force <- force_id # add a force identifier
+      output <- rbind(output, df_2) # add to dataframe
+      
+      print(paste("Working... ", i, " of ", num_months_backwards, " months retrieved", sep = ""))
+      print(date)
+    }
+    cat("\014")
+    print(paste("Working... ", j, " of ", length(force_ids), " forces retrieved. ", round(100 * (j / length(force_ids)),0), "% complete.", sep = ""))
+    
+  }
+  if(!is_empty(output)){ # only run if records exist 
+    # unlist remaining listed columns. Not ideal solution but will have to do for now
+    output <- output %>%
+      unnest_wider(., outcome_object, names_sep = ".") %>%
+      unnest_wider(., location, names_sep = ".") %>%
+      unnest_wider(., location.street, names_sep = ".")
+    output <- as.matrix(output) # make matrix because write.csv runs into problems with list cols
+  }
+  if(!is.na(no_record_df[1,1])){
+    print(paste0(nrow(no_record_df), " record(s) missing. See table for details."))
+    print(no_record_df)
+  }
+  if(!is.na(server_error_df[1,1])){
+    print(paste0(nrow(server_error_df), " server request(s) failed. See table for details."))
+    print(no_record_df)
+  }
+  if(!is.na(locations_missing_df[1,1])){
+    print(paste0(nrow(locations_missing_df), " records have missing locations for all entries. See table for details."))
+    print(locations_missing_df)
+  }
+  return(output) # testing... change back to output
+  
+}
+
+#test <- retrieve_force_data(force_ids[1:22], num_months_backwards = 12)
+#test_2 <- retrieve_force_data(force_ids[23:26], num_months_backwards = 12)
+
+# test_3 <- retrieve_force_data(force_ids[30], num_months_backwards = 2)
+# test_4 <- retrieve_force_data(force_ids[32], num_months_backwards = 2)
+# test_5 <- retrieve_force_data(force_ids[31], num_months_backwards = 2)
+
+test <- retrieve_force_data(force_ids, num_months_backwards = 12)
+
+#write.csv(test, file = "../data/stop_search_national.csv")
+```
+
+```{r}
+attempt <- 1
+max <- Inf
+while(attempt <= Inf){
+  print(attempt)
+  attempt <- attempt + 1
+  Sys.sleep(0)
+}
+```
+
+```{r}
+f <- httr::GET("https://data.police.uk/api/stops-force?force=nottinghamshire&date=2021-09")
+df <- httr::content(f)
+
+keep <- list()
+for(k in 1:length(df)){
+  if(!is.null(df[[k]][["location"]])){
+    keep <- append(keep, list(df[[k]]))
+  }
+}
+
+df_2 <- data.frame(t(sapply(df,c))) # convert to df
+df_2$force <- force_id # add a force identifier
+```
+
+```{r}
+date <- "2021-09"
+body <- list("force" = "northern-ireland",
+           "date" = date)
+post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+
+while(post_request[["status_code"]] != 200){
+try(
+  post_request <- httr::POST("https://data.police.uk/api/stops-force?", body = body) # POST request
+)
+}
+
+
+if(post_request[["status_code"]] != 200){
+  print("error")
+}
+
+df <- httr::content(post_request)
+```
+
+
+# places
+
+```{r}
+places <- read.csv("../data/ward_to_country_list.csv")
+
+regions <- unique(places$RGN19NM)
+
+# temp <- places %>% 
+#   distinct(WD19NM, .keep_all = TRUE) %>%
+#   subset(select = -c(1))
+
+write_csv(temp, file = "../data/places_ward_to_country.csv")
+
+```
+
+
+# bottom up
+
+```{r}
+
+
+get_la_coordinates <- function(la_list, start_index = 1, end_index = NULL, wait_time = 5, max_tries = Inf){
+  coords <- list()
+  if(is.null(end_index)){
+    for(i in start_index:nrow(la_list)){
+    la_code <- la_list[i, 1]
+    la_name <- la_list[i, 2]
+    county <- la_list[i, 4]
+    region <- la_list[i, 6]
+    country <- la_list[i, 8]
+    attempt <- 1
+    request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la_code, ".geojson"))
+    if(request[["status_code"]] == 429){ # if quota reached, break
+      print("Quota reached. Abandoning request.")
+      break
+    }
+    else{
+      while(request[["status_code"]] != 200 && attempt <= max_tries){ 
+        print(paste0("Server error. Trying again (", attempt,")"))
+        Sys.sleep(wait_time) # wait some time before trying again
+        try(
+          request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la_code, ".geojson"))
+        )
+        if(request[["status_code"]] == 429){ # if quota reached, break
+          print("Quota reached. Abandoning request.")
+          break
+        }
+      attempt <- attempt + 1
+      }      
+    }
+
+    coords[[i]] <- list(coords = httr::content(request),
+                        la = la_name,
+                        county = county,
+                        region = region,
+                        country = country)
+    names(coords[[i]]) <- la_name
+    cat("\014")
+    #coords[[i]] <- "a"
+    print(paste0("Working... ", i, " of ", nrow(las), " local authority coordinates retrieved (", round(100 * (i / nrow(las))),"%)"))
+    #print("A was run")
+    }
+  }
+  else{
+    for(i in start_index:end_index){
+      la_code <- la_list[i, 1]
+      la_name <- la_list[i, 2]
+      county <- la_list[i, 4]
+      region <- la_list[i, 6]
+      country <- la_list[i, 8]
+      attempt <- 1
+      request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la_code, ".geojson"))
+      if(request[["status_code"]] == 429){ # if quota reached, break
+        print("Quota reached. Abandoning request.")
+        break
+      }
+      else{
+        while(request[["status_code"]] != 200 && attempt <= max_tries){
+          print(paste0("Server error. Trying again (", attempt,")"))
+          Sys.sleep(wait_time) # wait some time before trying again
+          try(
+            request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la_code, ".geojson"))
+          )
+          if(request[["status_code"]] == 429){ # if quota reached, break
+            print("Quota reached. Abandoning request.")
+            break
+          }
+        attempt <- attempt + 1
+        }
+      }
+      
+      coords[[i]] <- list(coords = httr::content(request),
+                          la = la_name,
+                          county = county,
+                          region = region,
+                          country = country)
+      names(coords)[i] <- la_name
+      cat("\014")
+      
+      #coords[[i]] <- "b"
+  
+      print(paste0("Working... ", i, " of ", end_index, " local authority coordinates retrieved (", round(100 * (i / end_index)),"%)"))
+    #print("B was run")
+    }
+  }
+  
+  return(coords)
+}
+
+coords_2 <- get_la_coordinates(las, start_index = 1, end_index = 5)
+#test_2 <- get_la_coordinates(las, start_index = 1)
+```
+
+```{r}
+save(coords, file = "coords_1_to_5.Rdata")
+
+test <- list()
+test[[1]] <- list(coords = c(1,2,4),
+                  la = "bleh",
+                  county = "belh",
+                  region = "asd",
+                  country = "asdf") 
+```
+
+# places from geopackage
+
+```{r}
+las <- read.csv("../data/ward_to_country_list.csv")
+ogrListLayers("../data/bdline_gb.gpkg") # check layers
+geo_data <- st_read("../data/bdline_gb.gpkg", layer = "district_borough_unitary_ward") # extract layer of interest
+geo_geom <- geo_data$geometry # get geometry columns
+geo_geom_wgs84 <- st_transform(geo_geom, crs = "WGS84") # tranform to longitude/latitude
+names(geo_geom_wgs84) <- geo_data$Name # add names
+
+missing_data <- data.frame(ward_name = NA,
+                           la = NA,
+                           county = NA,
+                           region = NA,
+                           country = NA)
+# add la, county, region, and country names
+for(i in 1:length(geo_geom_wgs84)){
+  geo_geom_wgs84[[i]][["census_code"]] <- geo_data$Census_Code[i] # take census code
+  try(
+    geo_geom_wgs84[[i]][["la"]] <- las[which(las$WD19CD == geo_data$Census_Code[i]), "LAD19NM"]
+  )
+  try(
+    geo_geom_wgs84[[i]][["county"]] <- las[which(las$WD19CD == geo_data$Census_Code[i]), "CTY19NM"]
+  )
+  try(
+    geo_geom_wgs84[[i]][["region"]] <- las[which(las$WD19CD == geo_data$Census_Code[i]), "RGN19NM"]
+  )
+  try(
+    geo_geom_wgs84[[i]][["country"]] <- las[which(las$WD19CD == geo_data$Census_Code[i]), "CTRY19NM"]
+  )
+  
+  # report which LAs have missing values 
+  if(is_empty(geo_geom_wgs84[[i]][["la"]])){
+    print(paste0(names(geo_geom_wgs84)[i], " la missing (", i, ")"))
+    missing_data[i, "ward_name"] <- names(geo_geom_wgs84)[i]
+    missing_data[i, "la"] <- 1
+  }
+  if(is_empty(geo_geom_wgs84[[i]][["county"]])){
+    print(paste0(names(geo_geom_wgs84)[i], " county missing (", i, ")"))
+    missing_data[i, "ward_name"] <- names(geo_geom_wgs84)[i]
+    missing_data[i, "county"] <- 1
+  }
+  if(is_empty(geo_geom_wgs84[[i]][["region"]])){
+    print(paste0(names(geo_geom_wgs84)[i], " region missing (", i, ")"))
+    missing_data[i, "ward_name"] <- names(geo_geom_wgs84)[i]
+    missing_data[i, "region"] <- 1
+  }
+  if(is_empty(geo_geom_wgs84[[i]][["country"]])){
+    print(paste0(names(geo_geom_wgs84)[i], " country missing (", i, ")"))
+    missing_data[i, "ward_name"] <- names(geo_geom_wgs84)[i]
+    missing_data[i, "country"] <- 1
+    }
+  names(geo_geom_wgs84[[i]])[1] <- "coords"
+  names(geo_geom_wgs84[[i]][[1]])[1] <- "coordinates"
+}
+
+missing_data <- missing_data[!is.na(missing_data),]
+# manually add missing values
+
+# geo_geom_wgs84[["West Northamptonshire"]][["la"]] <- "West Northamptonshire"
+# geo_geom_wgs84[["West Northamptonshire"]][["region"]] <- "East Midlands"
+# geo_geom_wgs84[["West Northamptonshire"]][["country"]] <- "England"
+# 
+# geo_geom_wgs84[["North Northamptonshire"]][["la"]] <- "North Northamptonshire"
+# geo_geom_wgs84[["North Northamptonshire"]][["region"]] <- "East Midlands"
+# geo_geom_wgs84[["North Northamptonshire"]][["country"]] <- "England"
+# 
+# geo_geom_wgs84[["Buckinghamshire"]][["la"]] <- "Buckinghamshire"
+# geo_geom_wgs84[["Buckinghamshire"]][["region"]] <- "South East"
+# geo_geom_wgs84[["Buckinghamshire"]][["country"]] <- "England"
+```
+
+```{r}
+k <- geo_geom_wgs84[[1]]
+k[["coords"]] <- as.matrix(unlist(k[["coords"]][["coordinates"]]))
+```
+
+```{r}
+test <- geo_geom_wgs84[["Na h-Eileanan an Iar"]]
+coords_for_map <- coords_unlisted[["Na h-Eileanan an Iar"]]# map wants long, lat
+
+leaflet(as.matrix(coords_for_map)) %>% 
+  addPolygons() %>% 
+  addTiles()
+```
+
+```{r}
+coords <- las_26_to_50[1]
+coords[[1]] <- append(coords[[1]], 
+                          list(la = "Hartlepool",
+                          county = "",
+                          region = "North East",
+                          country = "England"))
+
+
+```
+
+# unlisting - current working version
+
+needs revision now that coord extraction code has changed
+
+## for mapit
+
+```{r}
+coords_unlisted <- list()
+for(i in 1:length(coords)){
+  coords_unlisted[[i]] <- unlist(coords[[i]][["coords"]][["coordinates"]], recursive = T, use.names = F)
+  #coords_unlisted[[i]] <- coords_unlisted[[i]][-1]
+  coords_unlisted[[i]] <- as.numeric(coords_unlisted[[i]])
+  val_1 <- data.frame("long" = coords_unlisted[[i]][seq(1, length(coords_unlisted[[i]]),2)])
+  val_2 <- data.frame("lat" = coords_unlisted[[i]][seq(2, length(coords_unlisted[[i]]),2)])
+  # val_3 <- data.frame("la" = coords[[i]][["la"]])
+  # val_4 <- data.frame("county" = coords[[i]][["county"]])
+  # val_5 <- data.frame("region" = coords[[i]][["region"]])
+  # val_6 <- data.frame("country" = coords[[i]][["country"]])
+  coords_unlisted[[i]] <- list(coords = cbind(val_1, val_2), 
+                               la = coords[[i]][["la"]],
+                               county =  coords[[i]][["county"]],
+                               region = coords[[i]][["region"]],
+                               country = coords[[i]][["country"]])
+  names(coords_unlisted)[i] <- coords[[i]][["la"]]
+}
+
+```
+
+## for geopackage 
+
+```{r}
+coords <- geo_geom_wgs84
+# recursively unlist coordinates so that each element of list coontains a dataframe 
+# of long/lat coordinates
+coords_unlisted <- list()
+for(i in 1:length(coords)){
+  df <- as.data.frame(unlist(coords[[i]][["coords"]][["coordinates"]]))
+  colnames(df) <- c("long","lat")
+  #coords_unlisted[[i]] <- coords_unlisted[[i]][-1]
+  #coords_unlisted[[i]] <- as.numeric(coords_unlisted[[i]])
+  # val_1 <- data.frame("long" = coords_unlisted[[i]][seq(1, length(coords_unlisted[[i]]),2)])
+  # val_2 <- data.frame("lat" = coords_unlisted[[i]][seq(2, length(coords_unlisted[[i]]),2)])
+  # val_3 <- data.frame("la" = coords[[i]][["la"]])
+  # val_4 <- data.frame("county" = coords[[i]][["county"]])
+  # val_5 <- data.frame("region" = coords[[i]][["region"]])
+  # val_6 <- data.frame("country" = coords[[i]][["country"]])
+  coords_unlisted[[i]] <- list(coords = df, 
+                               la = coords[[i]][["la"]],
+                               county =  coords[[i]][["county"]],
+                               region = coords[[i]][["region"]],
+                               country = coords[[i]][["country"]])
+  names(coords_unlisted)[i] <- coords[[i]][["la"]]
+}
+
+# k <- coords_unlisted[[1]]
+# la_names <- as.vector(las$LAD20NM[26:50]) # change indexes
+
+#names(coords_unlisted) <- la_names
+
+#save(coords_unlisted, file = "coords_26_to_50.Rdata")
+```
+
+```{r}
+f <- as.data.frame(unlist(coords[[1]][["coords"]][["coordinates"]]))
+colnames(f) <- c("long","lat")
+```
+
+```{r}
+k <- unlist(coords[[i]][["coords"]][["coordinates"]], recursive = T, use.names = F)
+```
+
+
+# map check
+
+```{r}
+coords_for_map <- coords_unlisted[[2]] # map wants long, lat
+
+leaflet(as.matrix(coords_for_map)) %>% 
+  addPolygons() %>% 
+  addTiles()
+```
+
+```{r}
+length(coords_unlisted)
+area_coords <- coords_unlisted[[1]]
+nrow(area_coords)
+```
+
+
+# area police api
+
+```{r}
+# Acquire stop and search data in an area for a time period
+
+# area_coords: area of interest. Must be a data frame with column names "lat" and "long" 
+
+# most_recent_month: numeric value specifying most recent month (e.g. 8 for August)
+
+# most_recent_year (YYYY): numeric value specifying most recenet year (e.g. 2021)
+
+# num_months_backwards: number of months backwards for which data are required. 
+# Default = 12. For example, if the most recent year of data is required, 
+# num_months_backwards would be 12
+
+# If most_recent_month/year is not specified, function will query Police API for
+# most recent update and use this as a start point
+
+retrieve_area_data <- function(coord_list, 
+                               most_recent_month = NULL, 
+                               most_recent_year = NULL, 
+                               num_months_backwards = 12, 
+                               wait_time = 5, 
+                               max_tries = Inf){
+  
+  overall_output <- data.frame()
+  no_entries_df <- data.frame(setNames(rep(list(NA), 2), c("Index","Name")))
+  # make coordinate string for POST request
+  
+  for(h in 1:length(coord_list)){
+    la <- coord_list[[h]][["la"]]
+    county <- coord_list[[h]][["county"]]
+    if(is_empty(county)){
+      county <- NA
+    }
+    region <- coord_list[[h]][["region"]]
+    if(is_empty(region)){
+      region <- NA
+    }
+    country <- coord_list[[h]][["country"]]
+    # print(h)
+    coord_string <- c()
+    area_output <- data.frame() # initialise dataframe
+    area_coords <- coord_list[[h]][["coords"]]
+    for(i in 1:nrow(area_coords)){
+      #print(paste0("i = ", i))
+      if(i == 1){
+        coord_string <- paste(area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+      }else{
+        coord_string <- paste(coord_string,":",area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+      }
+    }
+    #print("got here")
+  # get most recent update if most_recent data not specified
+    if(is.null(most_recent_month) || is.null(most_recent_year)){ 
+      date <- httr::content(httr::GET("https://data.police.uk/api/crimes-street-dates"))[[1]][["date"]] # get most recent update
+      most_recent_month <- as.numeric(substr(date,6,7))
+      most_recent_year <- as.numeric(substr(date,1,4))
+    }
+    else{
+      most_recent_month <- most_recent_month
+      most_recent_year <- most_recent_year
+    }
+    
+    # specify formatted date
+    for(i in 1:num_months_backwards){
+      if(i == 1){ # set values for first iteration
+        month_num <- most_recent_month
+        year <- most_recent_year
+      }
+      else{ # subsequent iterations
+        month_num <- month_num - 1 # backwards a month each iteration
+        if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+          month_num <- 12
+          year <- year - 1 # backwards a year
+        }
+      }
+      if(month_num < 10){ # paste 0 for months lower than 10
+        month <- paste("0", month_num, sep = "")
+      }
+      else{
+        month <- month_num
+      }
+      
+      
+      date <- paste(year, "-", month, sep = "") # combine dates into format for api
+      body <- list("poly" = coord_string,
+                   "date" = date)
+      post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body) # POST request
+      if(post_request[["status_code"]] == 429){ # if quota reached, break
+        print("Quota reached. Abandoning request.")
+        break
+      }
+      else{
+        attempt <- 1
+        while(post_request[["status_code"]] != 200 && attempt <= max_tries){ 
+          print(paste0("Server error. Trying again (", attempt,")"))
+          Sys.sleep(wait_time) # wait some time before trying again
+          try(
+            post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body)
+          )
+          if(post_request[["status_code"]] == 429){ # if quota reached, break
+            print("Quota reached. Abandoning request.")
+            break
+          }
+          attempt <- attempt + 1
+        }
+      }
+
+      df <- httr::content(post_request) # get content from response
+      df_2 <- lapply(df, unlist)
+      df_3 <- do.call(bind_rows, df_2) # convert to df
+      area_output <- bind_rows(area_output, df_2) # add to dataframe. use bindrows for possibility of non-matching variables
+      print(paste("Working... ", i, " of ", num_months_backwards, " months retrieved (", date, ")", sep = ""))
+      #print(date)
+    }
+    if(is_empty(area_output)){
+      if(is.na(no_entries_df[1,1])){ # if first occurence, replaces NAs 
+        no_entries_df[1,] <- c(h, la)
+      }
+      else{ # rbind subsequent occurences
+        no_entries_df <- rbind(no_entries_df, c(h, la))        
+      }
+      print(paste0("No records for ", la))
+      next
+    }
+    # add place data
+    area_output$la <- la
+    area_output$county <- county
+    area_output$region <- region
+    area_output$country <- country
+  
+    # move location data to front of df
+    area_output <- area_output %>%
+      select(la, county, region, country, everything())
+    overall_output <- bind_rows(overall_output, area_output)
+    
+    cat("\014")
+    print(paste0("Working... ", h, " of ", length(coord_list), " areas retrieved (", round(100 * (h / length(coord_list)), 2), "%)"))
+  }
+  # this no longer necessary
+  # if(!is_empty(overall_output)){
+  #   #unlist remaining listed columns. Not ideal solution but will have to do for now
+  #   overall_output <- overall_output %>%
+  #     unnest_wider(., outcome_object, names_sep = ".") %>%
+  #     unnest_wider(., location, names_sep = ".") %>%
+  #     unnest_wider(., location.street, names_sep = ".")
+  # }
+  
+  #overall_output <- as.matrix(overall_output) # make matrix because write.csv runs into problems with list cols
+  return(list(result = overall_output,
+              missing_entries = no_entries_df)) # testing... change back to overall_output
+}
+
+
+#test_list <- coords_unlisted[c(1,3,4,5)]
+# k_2 <- retrieve_area_data(coord_list = test_list, num_months_backwards = 1, most_recent_month = 8, most_recent_year = 2021)
+this_list <- coords_unlisted[c(123:123)]
+data <- retrieve_area_data(this_list, num_months_backwards = 12, most_recent_month = 10, most_recent_year = 2021)
+
+data_2 <- data[[1]]
+data_2$age_range <- unlist(data_2$age_range)
+
+data_matrix <- as.matrix(data_2)
+
+save(data, file = "../data/las_301_to_363.Rdata")
+
+# write_csv(data_matrix, file = "../data/test_save_2.csv")
+write.csv(data_2, file = "../data/test.csv")
+```
+
+
+
+```{r}
+area_coords <- coords_unlisted[[123]][["coords"]]
+
+for(i in 1:nrow(area_coords)){
+  #print(paste0("i = ", i))
+  if(i == 1){
+    coord_string <- paste(area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+  }else{
+    coord_string <- paste(coord_string,":",area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+  }
+  cat("\014")
+  print(paste0(i, " of ", nrow(area_coords)))
+}
+
+save(coord_string, file = "../data/highlands_coord_string.Rdata")
+date <- "2021-10"
+body <- list("poly" = coord_string,
+                   "date" = date)
+post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body)
+
+df <- httr::content(post_request) # get content from response
+df_2 <- sapply(df, unlist)
+df_3 <- do.call(bind_rows, df_2)
+data.frame(t(sapply(df,c)))
+#df_3 <- data.frame(t(sapply(lapply(df, unlist),c))) # convert to d
+```
+```{r}
+temp_func <- function(coord_string, 
+                               most_recent_month = 10, 
+                               most_recent_year = 2021, 
+                               num_months_backwards = 12, 
+                               wait_time = 5, 
+                               max_tries = Inf){
+  area_output <- data.frame()
+    for(i in 1:num_months_backwards){
+      if(i == 1){ # set values for first iteration
+        month_num <- most_recent_month
+        year <- most_recent_year
+      }
+      else{ # subsequent iterations
+        month_num <- month_num - 1 # backwards a month each iteration
+        if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+          month_num <- 12
+          year <- year - 1 # backwards a year
+        }
+      }
+      if(month_num < 10){ # paste 0 for months lower than 10
+        month <- paste("0", month_num, sep = "")
+      }
+      else{
+        month <- month_num
+      }
+      
+      
+      date <- paste(year, "-", month, sep = "") # combine dates into format for api
+      body <- list("poly" = coord_string,
+                   "date" = date)
+      post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body) # POST request
+      if(post_request[["status_code"]] == 429){ # if quota reached, break
+        print("Quota reached. Abandoning request.")
+        break
+      }
+      else{
+        attempt <- 1
+        while(post_request[["status_code"]] != 200 && attempt <= max_tries){ 
+          print(paste0("Server error. Trying again (", attempt,")"))
+          Sys.sleep(wait_time) # wait some time before trying again
+          try(
+            post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body)
+          )
+          if(post_request[["status_code"]] == 429){ # if quota reached, break
+            print("Quota reached. Abandoning request.")
+            break
+          }
+          attempt <- attempt + 1
+        }
+      }
+
+      df <- httr::content(post_request) # get content from response
+      df_2 <- lapply(df, unlist)
+      df_3 <- do.call(bind_rows, df_2) # convert to df
+      area_output <- bind_rows(area_output, df_2) # add to dataframe. use bindrows for possibility of non-matching variables
+    }
+  return(area_output)                    
+           }
+
+highlands_data <- temp_func(coord_string)
+
+highlands_data$la <- "Highlands"
+highlands_data$county <- NA 
+highlands_data$region <- NA
+highlands_data$country <- "Scotland"
+
+highlands_data <- highlands_data %>%
+  select(la, county, region, country, everything())
+
+save(highlands_data, file = "../data/las_123.Rdata")
+```
+
+```{r}
+load("../data/las_1_to_50.Rdata")
+data_1 <- data[[1]]
+missing_areas_1 <- data[[2]]
+load("../data/las_51_to_100.Rdata")
+data_2 <- data[[1]]
+missing_areas_2 <- data[[2]]
+load("../data/las_101_to_122.Rdata")
+data_3 <- data[[1]]
+missing_areas_3 <- data[[2]]
+load("../data/las_123.Rdata")
+data_4 <- highlands_data
+#missing_areas_4 <- data[[2]]
+load("../data/las_124_to_150.Rdata")
+data_5 <- data[[1]]
+missing_areas_5 <- data[[2]]
+load("../data/las_151_to_175.Rdata")
+data_6 <- data[[1]]
+missing_areas_6 <- data[[2]]
+load("../data/las_176_to_200.Rdata")
+data_7 <- data[[1]]
+missing_areas_7 <- data[[2]]
+load("../data/las_201_to_300.Rdata")
+data_8 <- data[[1]]
+missing_areas_8 <- data[[2]]
+load("../data/las_301_to_363.Rdata")
+data_9 <- data[[1]]
+missing_areas_9 <- data[[2]]
+
+
+all_data <- bind_rows(data_1,
+                      data_2,
+                      data_3,
+                      data_4,
+                      data_5,
+                      data_6,
+                      data_7,
+                      data_8,
+                      data_9)
+
+all_missing_areas <- rbind(missing_areas_1,
+                       missing_areas_2,
+                       missing_areas_3,
+                       #missing_areas_4,
+                       missing_areas_5,
+                       missing_areas_6,
+                       missing_areas_7,
+                       missing_areas_8,
+                       missing_areas_9)
+all_missing_areas <- all_missing_areas[-c(which(is.na(all_missing_areas))),]
+
+write_csv(all_data, file = "../data/national_stop_search_12_months_to_Oct21.csv")
+```
+
+```{r}
+coords_for_map <- coords_unlisted[["Na h-Eileanan Siar"]][["coords"]]
+
+leaflet(as.matrix(coords_for_map)) %>% 
+  addPolygons() %>% 
+  addTiles()
+```
+
+
+issue with e.g. east ayrshire cammansnahwire
+
+```{r}
+test <- k %>%
+  mutate(
+    unlist(outcome_object, recursive = T, use.names = F)
+  )
+```
+
+```{r}
+
+area_coords <- coords_unlisted[["Nottingham"]][["coords"]]
+for(i in 1:nrow(area_coords)){
+  #print(paste0("i = ", i))
+  if(i == 1){
+    coord_string <- paste(area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+  }else{
+    coord_string <- paste(coord_string,":",area_coords[i,"lat"],",",area_coords[i,"long"],sep="")
+  }
+}
+date <- "2021-10"
+body <- list("poly" = coord_string,
+                   "date" = date)
+post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body) # POST request
+df <- httr::content(post_request) # get content from response
+df_2 <- data.frame(t(sapply(df,c))) # convert to df
+```
+
+
+# map check
+
+```{r}
+leaflet(as.matrix(area_coords)) %>% 
+  addPolygons() %>% 
+  addTiles()
+```
+
+need to find better solution for unlisting location etc. maybe unlist recursive option
+
+```{r}
+for(i in 1:length(coords_unlisted)){
+  print(i)
+}
+```
+
+
+```{r}
+las <- read.csv("../data/LA_list.csv")
+
+get_la_coordinates <- function(la_list, start_index = 1, end_index = NULL, wait_time = 5, max_tries = Inf){
+  coords <- list()
+  if(is.null(end_index)){
+    for(i in start_index:nrow(la_list)){
+    la <- la_list[i, 2]
+    attempt <- 1
+    # request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la, ".geojson"))
+    # while(request[["status_code"]] != 200 && attempt <= max_tries){
+    #   print(paste0("Server error. Trying again (", attempt,")"))
+    #   Sys.sleep(wait_time) # wait some time before trying again
+    #   try(
+    #     request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la, ".geojson"))
+    #   )
+    # attempt <- attempt + 1
+    # }
+    # coords[[i]] <- httr::content(request)
+    # 
+    # cat("\014")
+    #coords[[i]] <- "a"
+    print(paste0("Working... ", i, " of ", nrow(las), " local authority coordinates retrieved (", round(100 * (i / nrow(las))),"%)"))
+    print("A was run")
+    }
+  }
+  else{
+    for(i in start_index:end_index){
+    la <- la_list[i, 2]
+    attempt <- 1
+    # request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la, ".geojson"))
+    # while(request[["status_code"]] != 200 && attempt <= max_tries){
+    #   print(paste0("Server error. Trying again (", attempt,")"))
+    #   Sys.sleep(wait_time) # wait some time before trying again
+    #   try(
+    #     request <- httr::GET(paste0("https://mapit.mysociety.org/area/", la, ".geojson"))
+    #   )
+    # attempt <- attempt + 1
+    # }
+    # coords[[i]] <- httr::content(request)
+    # cat("\014")
+    #coords[[i]] <- "b"
+
+    print(paste0("Working... ", i, " of ", end_index, " local authority coordinates retrieved (", round(100 * (i / end_index)),"%)"))
+    print("B was run")
+    }
+  }
+  return(coords)
+}
+
+test <- get_la_coordinates(las, start_index = 1)
+#test_2 <- get_la_coordinates(las, start_index = 1)
+```
+
+```{r}
+la <- "E06000001"
+k <- httr::GET(paste0("https://mapit.mysociety.org/area/", la, ".geojson"))
+
+l <- httr::content(k)
+save_k <- k
+```
+
+```{r}
+test <- list("coordinates" = list(list(c(1,1)),list(c(2,2))))
+```
+
+```{r}
+test_2 <- unlist(test)
+
+i <- 1
+name <- las[i,3]
+test_3[[i]] <- list(name = unlist(test))
+```
+
+
