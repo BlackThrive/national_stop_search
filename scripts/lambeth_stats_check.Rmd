@@ -1,0 +1,284 @@
+---
+title: "Lambeth Statistics Check"
+author: "Jolyon Miles-Wilson"
+date: "10/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(include = TRUE)
+```
+
+
+```{r include = FALSE}
+library(gmodels)
+library(tidyverse)
+library(rgdal)
+library(sf)
+library(leaflet)
+library(ggrepel)
+source("./la_search_police_api.R")
+```
+
+```{r}
+library(epitools)
+rr_from_df <- function(df, name){
+  # function takes dfs made earlier, transforms in matrices, and creates risk
+  # ratios and associated confidence intervals
+  # 'name' is the name of the indicator
+  mat <- matrix(c(df[2,2],
+                  df[2,1],
+                  df[1,2],
+                  df[1,1]), 2, 2)
+  df_out <- data.frame("indicator" = name,
+                     "rr" = riskratio(mat)[["measure"]][2,1],
+                     "ci_low" = riskratio(mat)[["measure"]][2,2],
+                     "ci_upp" = riskratio(mat)[["measure"]][2,3])
+  return(df_out)
+}
+```
+
+
+```{r include = FALSE}
+load("../data/la_coordinate_list.Rdata")
+```
+
+```{r include = FALSE}
+# coord_list <- coords["Lambeth"]
+# lambeth_data_list <- la_search_police_api(coord_list, most_recent_month = 8, most_recent_year = 2021)
+# lambeth_data_df <- lambeth_data_list[[1]]
+# save(lambeth_data_df, file = "../data/lambeth_df.Rdata")
+
+# load instead of rerunning above
+load("../data/lambeth_df.Rdata")
+df <- lambeth_data_df
+# ordered_df <- df[order(df$datetime),]
+```
+
+# Boundary definition from which stats were retrieved
+
+```{r}
+coords_for_map <- coords[["Lambeth"]][["coords"]] # map wants long, lat
+
+# this puts the coordinates in a form that leaflet can plot multiple polygons with
+coord_string <- c()
+for(i in 1:length(coords_for_map)){
+  temp_df <- rbind(coords_for_map[[i]], c(NA,NA)) # separate each set of coords with a row of NAs
+  coord_string <- rbind(coord_string, temp_df) # bind all sets together
+}
+
+leaflet(as.matrix(coord_string)) %>% # leaflet only accepts as matrix
+  addPolygons()  %>%
+  addTiles() 
+```
+
+```{r}
+# collapse ethnicity 
+df$self_defined_ethnicity <- as.factor(df$self_defined_ethnicity)
+df$self_defined_ethnicity <- fct_collapse(df$self_defined_ethnicity,
+                                          Asian = c("Asian/Asian British - Any other Asian background",
+                                          "Asian/Asian British - Bangladeshi",
+                                          "Asian/Asian British - Chinese",
+                                          "Asian/Asian British - Indian",
+                                          "Asian/Asian British - Pakistani"),
+                                          Black = c("Black/African/Caribbean/Black British - African",
+                                          "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background",
+                                          "Black/African/Caribbean/Black British - Caribbean"),
+                                          Mixed = c("Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background",
+                                          "Mixed/Multiple ethnic groups - White and Asian",
+                                          "Mixed/Multiple ethnic groups - White and Black African",
+                                          "Mixed/Multiple ethnic groups - White and Black Caribbean"),
+                                          Other = c("Other ethnic group - Any other ethnic group",
+                                          "Other ethnic group - Not stated"),
+                                          White = c("White - Any other White background",
+                                          "White - English/Welsh/Scottish/Northern Irish/British",
+                                          "White - Irish")
+)
+
+subset_df <- subset(df, self_defined_ethnicity == "White" | self_defined_ethnicity == "Black")
+
+subset_df$self_defined_ethnicity <- factor(subset_df$self_defined_ethnicity, levels = c("White", "Black"))
+```
+
+# Stats from data derived from function 
+
+```{r}
+freq_data <- subset_df %>%
+  group_by(self_defined_ethnicity) %>%
+  summarise(
+    stopped = n()
+  ) %>%
+  mutate(
+    pop = c(177400, 54600),
+    percentage = 100 * (stopped/pop),
+    not_stopped = pop - stopped
+  ) %>%
+  rename(
+    ethnicity = self_defined_ethnicity
+  ) %>%
+  as.data.frame()
+
+
+row.names(freq_data) <- freq_data$ethnicity
+
+black <- data.frame("Black" = c("stopped" = freq_data["Black", "stopped"], "not_stopped" = freq_data["Black", "not_stopped"]))
+
+white <- data.frame("White" = c("stopped" = freq_data["White", "stopped"], "not_stopped" = freq_data["White", "not_stopped"]))
+
+bw_mat <- as.matrix(cbind(black, white))
+
+stop_search_df <- as.data.frame(bw_mat) # save df
+
+# run analysis
+xtab_new <- CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+rr_stop_search_new <- rr_from_df(stop_search_df, "Police Stop and Search (2020-2021)")
+
+```
+
+# Stats based on data from MPS Dashboard
+
+```{r stop_search_self}
+# stop and search
+data <- read.csv("../data/Stops_LDS_Extract_12MonthsToEnd_202108.csv")
+
+data <- subset(data, Borough.of.Stop == "Lambeth") # subset to Lambeth
+
+# self-defined ethnicity
+self_defined_freq_data <- data %>%
+  group_by(SDE.Group) %>%
+  summarise(
+    stopped = n() # count frequencies
+  )
+
+self_defined_freq_data <- self_defined_freq_data %>%
+  mutate(
+    pop = c(6500, 54600, 26700, 177400), # Lambeth population estimates taken from APS 12 months to Jun 2021
+    percentage = 100 * (stopped/pop),
+    not_stopped = pop - stopped
+    ) %>%
+  rename(
+    ethnicity = SDE.Group
+  )
+
+self_defined_freq_data <- as.data.frame(self_defined_freq_data)
+row.names(self_defined_freq_data) <- self_defined_freq_data$ethnicity
+
+black <- data.frame("Black" = c("stopped" = self_defined_freq_data["Black", "stopped"], "not_stopped" = self_defined_freq_data["Black", "not_stopped"]))
+
+white <- data.frame("White" = c("stopped" = self_defined_freq_data["White", "stopped"], "not_stopped" = self_defined_freq_data["White", "not_stopped"]))
+
+bw_mat <- as.matrix(cbind(black, white))
+
+stop_search_df <- as.data.frame(bw_mat) # save df
+
+# run analysis
+xtab <- CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+xtab_stop_search <- xtab # save xtab for later
+rr_stop_search <- rr_from_df(stop_search_df, "Police Stop and Search (2020-2021)")
+```
+
+# Comparisons
+
+```{r}
+# make a single data frame containing rrs and ors for both old and new analyses
+
+# new
+rr_stop_search_new <- rr_stop_search_new %>%
+  rename(
+    value = rr
+  ) %>%
+  mutate(
+    which = "new",
+    stat = "rr"
+  )
+
+new_ors <- data.frame(indicator = rr_stop_search_new$indicator,
+                      value = xtab_new[["fisher.ts"]][["estimate"]],
+                      ci_low = xtab_new[["fisher.ts"]][["conf.int"]][1],
+                      ci_upp = xtab_new[["fisher.ts"]][["conf.int"]][2],
+                      which = "new",
+                      stat = "or", row.names = NULL)
+
+new_combined <- rbind(rr_stop_search_new, new_ors)
+
+# old
+
+rr_stop_search <- rr_stop_search %>%
+  rename(
+    value = rr
+  ) %>%
+  mutate(
+    which = "old",
+    stat = "rr"
+  )
+
+old_ors <- data.frame(indicator = rr_stop_search$indicator,
+                      value = xtab[["fisher.ts"]][["estimate"]],
+                      ci_low = xtab[["fisher.ts"]][["conf.int"]][1],
+                      ci_upp = xtab[["fisher.ts"]][["conf.int"]][2],
+                      which = "old",
+                      stat = "or", row.names = NULL)
+
+old_combined <- rbind(rr_stop_search, old_ors)
+
+# combine into one df
+comparison_table <- rbind(new_combined, old_combined)
+
+
+```
+
+```{r include = TRUE}
+
+dodge_val <- 0.5
+ggplot(comparison_table, aes(stat, value, colour = which)) +
+  geom_point(position = position_dodge(width = dodge_val)) +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_upp), position = position_dodge(width = dodge_val), width = 0.1) +
+  geom_text(aes(label = round(value,2)), position = position_dodge(width = dodge_val + .4))
+```
+
+Estimates are slightly lower in new analysis compared to old.
+
+```{r}
+# make combined frequnecy data table to plot and compare how numbers have changed
+
+new_freq_data <- freq_data %>%
+  mutate(
+    which = "new"
+  )
+old_freq_data <- self_defined_freq_data %>%
+  mutate(
+    which = "old"
+  )
+old_freq_data <- subset(old_freq_data, ethnicity == "Black" | ethnicity == "White")
+
+combined_freq_data <- rbind(new_freq_data, old_freq_data)
+
+# calculate difference in stop count
+white_diff <- combined_freq_data[which(combined_freq_data$ethnicity == "White" & combined_freq_data$which == "old"),"stopped"] -  combined_freq_data[which(combined_freq_data$ethnicity == "White" & combined_freq_data$which == "new"),"stopped"]
+
+black_diff <- combined_freq_data[which(combined_freq_data$ethnicity == "Black" & combined_freq_data$which == "old"),"stopped"] -  combined_freq_data[which(combined_freq_data$ethnicity == "Black" & combined_freq_data$which == "new"),"stopped"]
+
+white_diff_percent <- round(100*(1-(combined_freq_data[which(combined_freq_data$ethnicity == "White" & combined_freq_data$which == "new"),"stopped"] /  combined_freq_data[which(combined_freq_data$ethnicity == "White" & combined_freq_data$which == "old"),"stopped"])),2)
+
+black_diff_percent <- round(100*(1-(combined_freq_data[which(combined_freq_data$ethnicity == "Black" & combined_freq_data$which == "new"),"stopped"] /  combined_freq_data[which(combined_freq_data$ethnicity == "Black" & combined_freq_data$which == "old"),"stopped"])),2)
+
+
+```
+
+```{r include = TRUE}
+txt_pos <- max(combined_freq_data$stopped) * 1.2
+dodge_val <- 0.4
+ggplot(combined_freq_data, aes(ethnicity, stopped, group = which)) +
+  geom_col(aes(fill = which), position = "dodge") +
+  geom_label(aes(label = stopped), position = position_dodge(0.9)) +
+  annotate("text", x = 1, y = txt_pos, label = paste0("Difference = ", white_diff, "\n", white_diff_percent,"%")) +
+  annotate("text", x = 2, y = txt_pos, label = paste0("Difference = ", black_diff, "\n", black_diff_percent,"%"))
+```
+
+
+The number for the new figures is about 10% lower than the number for the new figures for BOTH White and Black people (`r white_diff_percent`% for White,`r black_diff_percent`% for Black). Suggests that the difference is not biased by omissions of just one group.
+
+It is possible that the difference is due to stops with no location recorded. In Sep 2020 (as an example - this can be done for any time frame), 11.6% of Metropolitan records had no location. However, it's unclear how the MPS Dashboard data would associate stops with no location to particular boroughs, so this might not be the correct explanation.
