@@ -142,9 +142,9 @@ rr_stop_search_new <- rr_from_df(stop_search_df, "Police Stop and Search (2020-2
 
 ```{r stop_search_self}
 # stop and search
-data <- read.csv("../data/Stops_LDS_Extract_12MonthsToEnd_202108.csv")
+data <- read.csv("../data/stop_search_lambeth_met_dashboard.csv")
 
-data <- subset(data, Borough.of.Stop == "Lambeth") # subset to Lambeth
+#data <- subset(data, Borough.of.Stop == "Lambeth") # subset to Lambeth
 
 # self-defined ethnicity
 self_defined_freq_data <- data %>%
