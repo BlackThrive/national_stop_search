@@ -100,6 +100,8 @@ rm(geo_geom_wgs84_2)
 rm(geo_geom_wgs84)
 rm(geo_geom)
 rm(geo_data)
+
+save(coords, file = "../data/coords.Rdata")
 ```
 
 # unlisting - may be unnecessary now. all below is now included in above function
@@ -230,9 +232,11 @@ la_search_police_api <- function(coord_list,
     }
     
     area_output <- data.frame() # initialise area output df
+    number_months_acquired <- 0 # initialise number of months acquired counter
     
     # i loop iterates over the months required 
     for(i in 1:num_months_backwards){
+      month_checker <- data.frame()
       # format date to what is needed for API query ("yyyy-mm")
       if(i == 1){ # set values for first iteration
         month_num <- most_recent_month
@@ -263,7 +267,7 @@ la_search_police_api <- function(coord_list,
       for(j in 1:length(coord_list[[h]][["coords"]])){
         # set this iteration's coordinate set:
         area_coords <- coord_list[[h]][["coords"]][[j]]
-        # combine coord strings into format required by API:
+        # combine coord strings into format required by API (much quicker than looping):
         coord_string <- paste0(area_coords$lat,",",area_coords$long, collapse = ":") 
         
         # create body for post request
@@ -307,6 +311,7 @@ la_search_police_api <- function(coord_list,
         # this LA iteration (h). Use bindrows for (high) possibility that columns
         # from different iterations will be in different order/missing
         area_output <- bind_rows(area_output, df_3) 
+        month_checker <- bind_rows(month_checker, df_3)
         
         cat("\014") # clear console 
         # report overall (i.e., LA) progress
@@ -323,8 +328,11 @@ la_search_police_api <- function(coord_list,
 
         
       } # coordinate set loop (j) ends
-      
-
+    
+    # if records have been acquired, increase months count
+    if(nrow(month_checker) > 0){
+       number_months_acquired <- number_months_acquired + 1
+    }
       
     } # month loop (i) ends
     
@@ -349,6 +357,8 @@ la_search_police_api <- function(coord_list,
     area_output$region <- region
     area_output$country <- country
     area_output$index <- h
+    area_output$number_months_acquired <- number_months_acquired
+    area_output$proportion_months_acquired <- number_months_acquired / num_months_backwards
     
     # move index and location data to front of df
     area_output <- area_output %>%
@@ -371,6 +381,40 @@ la_search_police_api <- function(coord_list,
 }
 
 
+
+```
+
+
+# data acquistion
+
+```{r}
+# reorder coord list so that multiple polygon areas are last
+coord_lengths <- matrix(nrow = length(coords), ncol = 2)
+for(i in 1:length(coords)){
+  coord_lengths[i,1] <- i
+  coord_lengths[i,2] <- length(coords[[i]][["coords"]])
+}
+
+coord_lengths_ordered <- coord_lengths[order(coord_lengths[,2]),]
+
+coord_lengths_ordered
+
+ordered_coords <- list()
+for(i in 1:length(coords)){
+  ordered_coords[[i]] <- coords[[coord_lengths_ordered[i]]]
+  names(ordered_coords)[i] <- names(coords)[coord_lengths_ordered[i]]
+}
+
+
+```
+
+```{r}
+data <- la_search_police_api(ordered_coords, num_months_backwards = 12, most_recent_month = 10, most_recent_year = 2021)
+save(data, file = "../data/stop_search_all_las_12_months_to_oct_21.Rdata")
+```
+
+
+```{r}
 # pick out areas with multiple poly areas
 poly_list <- matrix(ncol = 2)
 for(i in 1:length(coords)){
@@ -414,6 +458,38 @@ data_2$age_range <- unlist(data_2$age_range)
 # write.csv(data_2, file = "../data/test.csv")
 ```
 
+# dec 21 testing
+
+```{r}
+this_list <- coords[c(1:25)]
+data <- la_search_police_api(this_list, num_months_backwards = 12, most_recent_month = 10, most_recent_year = 2021)
+df <- data[["result"]]
+
+unique(df$number_months_acquired)
+
+df[which(df$number_months_acquired == 12),]
+seven <-df[which(df$number_months_acquired == 7),]
+
+five <-df[which(df$number_months_acquired == 5),]
+
+eleven <- df[which(df$number_months_acquired == 11),]
+
+eight <-df[which(df$number_months_acquired == 8),]
+ten <-df[which(df$number_months_acquired == 10),]
+
+
+bolton <- df[which(df$la == "Bolton"),]
+
+
+lambeth <- df[which(df$la == "Lambeth"),]
+
+area_coords <- this_list[["Sandwell"]][["coords"]][[1]]
+coord_string <- paste0(area_coords$lat,",",area_coords$long, collapse = ":") 
+sandwell_data <- temp_func(coord_string)
+#write(coord_string, file = "bolton_coords.txt")
+```
+
+
 ```{r}
 this_list <- coords[c(301:363)]
 data <- la_search_police_api(this_list, num_months_backwards = 12, most_recent_month = 10, most_recent_year = 2021)
@@ -422,6 +498,10 @@ save(data, file = "../data/las_301_to_363_list.Rdata")
 
 df <- data[[1]]
 save(df, file = "../data/las_301_to_363_df.Rdata")
+```
+
+```{r}
+load("../data/las_301_to_363_list.Rdata")
 ```
 
 
@@ -485,6 +565,7 @@ temp_func <- function(coord_string,
     }
   return(area_output)                    
            }
+bolton_data <- temp_func(coord_string)
 
 highlands_data <- temp_func(coord_string)
 
@@ -582,3 +663,4 @@ save(highlands_data, file = "../data/las_123.Rdata")
 - include force variable. there is a force boundary thing that might work
 - need to provide some way of weighting, or at least providing, information about 
 the amount of data there is for each LA. for example, some las are missing some months, and if we were to compare across LAs, this would have the effect of making some LAs look better than others simply because there's less data. this could be done by elaborating on the no_entries coding
+- separate date/time to separate columns?
