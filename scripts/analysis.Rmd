@@ -9,6 +9,8 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+# Packages
+
 ```{r}
 library(tidyverse)
 library(gmodels) # CrossTable()
@@ -32,6 +34,9 @@ rr_from_df <- function(df, name){
   return(df_out)
 }
 ```
+
+
+# Data
 
 ```{r}
 data <- read.csv("../data/national_dataset_with_forces.csv")
@@ -316,4 +321,90 @@ CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
 
 ```
 
+# Outcome analysis
+
+```{r}
+subset_df$nfa <- ifelse(subset_df$outcome_object.id == "bu-no-further-action", 1, 0)
+subset_df$gender <- factor(subset_df$gender, levels = c("Female","Male", "Other", NA))
+
+mod <- glm(nfa ~ gender * ethnicity, subset_df, family = "binomial")
+summary(mod)
+```
+
+```{r}
+library(emmeans)
+ems <- emmeans(mod, specs = c("ethnicity","gender"))
+ems <- emmeans(mod, specs = "ethnicity", by = "gender")
+ems <- emmeans(mod, specs = "gender", by = "ethnicity")
+
+contrast(ems)
+```
+
+# mixed
+
+```{r}
+library(lme4)
+
+mixed_mod <- glmer(nfa ~ gender * ethnicity + (ethnicity|force), subset_df, family = "binomial")
+summary(mixed_mod)
+
+```
+
+```{r}
+plot(ranef(mixed_mod))
+ranefs <- ranef(mixed_mod)$force
+
+ggplot(ranefs, aes(rownames(ranefs), ethnicityBlack)) +
+  geom_point() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+```
+
+To run chisquare analyses controlling for covaraites, we'd need to bin count tables wihtin levels of covariates. i.e. do a contingency table for each level of age range, gender, etc. 
+
+# Hotspot test
+
+```{r}
+lambeth <- subset(subset_df, la_name == "Lambeth")
+
+lambeth_freq <- lambeth[,c("ethnicity","location.street.name","location.longitude","location.latitude")] %>%
+  group_by(ethnicity,location.street.name) %>%
+  # summarise(
+  #   n = n(),
+  #   long = location.longitude,
+  #   lat = location.latitude
+  # ) %>%
+  mutate(
+    n = n(),
+    percentage = 100 * (n / sum(n))
+  )
+
+lambeth_freq <- lambeth_freq[order(lambeth_freq$ethnicity, lambeth_freq$n, decreasing = T),]
+lambeth_freq <- lambeth_freq[!duplicated(lambeth_freq$location.street.name),]
+
+
+lambeth_coords <- lambeth[,c("ethnicity","location.longitude","location.latitude")]
+```
+
+```{r}
+library(leaflet)
+lambeth_coords_black <- subset(lambeth_freq, ethnicity == "Black")
+lambeth_coords_white <- subset(lambeth_freq, ethnicity == "White")
+
+lambeth_coords_white[,3] <- as.numeric(unlist(lambeth_coords_white[,3]))
+
+cols <- colorFactor(palette = c("orange","black"),lambeth_coords$ethnicity)
+
+# this accounts for frequency (technically). Ideally would improve this with a more sensitive scale
+leaflet() %>%
+  addCircleMarkers(data = lambeth_coords, lng = ~location.longitude, lat = ~location.latitude, color = ~cols(ethnicity), radius = 1, opacity = 0.2) %>%
+  addTiles() %>%
+  addLegend(pal = cols, values = lambeth_coords$ethnicity)
+
+# this just plots the unique places that blakc and white people are stopped
+# shows that black people are stopped everywhere, whereas there are fewer unique locatoins where white people are stopped
+leaflet() %>%
+  addCircleMarkers(data = lambeth_freq, lng = ~location.longitude, lat = ~location.latitude, color = ~cols(ethnicity), radius = 1, opacity = 0.7) %>%
+  addTiles() %>%
+  addLegend(pal = cols, values = lambeth_freq$ethnicity)
+```
 
