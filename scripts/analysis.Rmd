@@ -1,0 +1,319 @@
+---
+title: "Untitled"
+author: "Jolyon Miles-Wilson"
+date: "07/01/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(gmodels) # CrossTable()
+library(epitools) # riskratio
+```
+
+```{r}
+
+rr_from_df <- function(df, name){
+  # function takes dfs made earlier, transforms in matrices, and creates risk
+  # ratios and associated confidence intervals
+  # 'name' is the name of the indicator
+  mat <- matrix(c(df[2,2],
+                  df[2,1],
+                  df[1,2],
+                  df[1,1]), 2, 2)
+  df_out <- data.frame("indicator" = name,
+                     "rr" = riskratio(mat)[["measure"]][2,1],
+                     "ci_low" = riskratio(mat)[["measure"]][2,2],
+                     "ci_upp" = riskratio(mat)[["measure"]][2,3])
+  return(df_out)
+}
+```
+
+```{r}
+data <- read.csv("../data/national_dataset_with_forces.csv")
+
+data_no_ni <- subset(data, country != "Northern Ireland") # don't consider NI because don't currently have pop data
+
+#save(df, file = "../data/national_dataset_with_forces.Rdata")
+```
+
+```{r}
+population_ests <- read.csv("../data/la_pop_estimates_2021_2.csv")
+population_ests <- population_ests %>%
+  mutate(across(ncol(population_ests)), na_if(., "!")) %>%
+  mutate(across(ncol(population_ests)), na_if(., "-")) %>%
+  mutate(across(ncol(population_ests)), na_if(., "~"))
+```
+
+```{r}
+df <- data_no_ni
+# collapse ethnicity 
+df$self_defined_ethnicity <- as.factor(df$self_defined_ethnicity)
+df$self_defined_ethnicity <- fct_collapse(df$self_defined_ethnicity,
+                                          Asian = c("Asian/Asian British - Any other Asian background",
+                                          "Asian/Asian British - Bangladeshi",
+                                          "Asian/Asian British - Chinese",
+                                          "Asian/Asian British - Indian",
+                                          "Asian/Asian British - Pakistani"),
+                                          Black = c("Black/African/Caribbean/Black British - African",
+                                          "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background",
+                                          "Black/African/Caribbean/Black British - Caribbean"),
+                                          Mixed = c("Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background",
+                                          "Mixed/Multiple ethnic groups - White and Asian",
+                                          "Mixed/Multiple ethnic groups - White and Black African",
+                                          "Mixed/Multiple ethnic groups - White and Black Caribbean"),
+                                          Other = c("Other ethnic group - Any other ethnic group",
+                                          "Other ethnic group - Not stated"),
+                                          White = c("White - Any other White background",
+                                          "White - English/Welsh/Scottish/Northern Irish/British",
+                                          "White - Irish")
+)
+
+subset_df <- subset(df, self_defined_ethnicity == "White" | self_defined_ethnicity == "Black")
+subset_df$self_defined_ethnicity <- factor(subset_df$self_defined_ethnicity, levels = c("White", "Black"))
+subset_df <- subset_df %>%
+  rename(
+    ethnicity = self_defined_ethnicity
+  )
+
+# fix misspelling of Rhondda Cynon Taff
+subset_df$la_name[which(subset_df$la_name == "Rhondda Cynon Taf")] <- "Rhondda Cynon Taff"
+```
+
+```{r}
+
+
+```
+
+```{r}
+las <- unique(subset_df$la_name) # get la names from the dataset
+all_results <- data.frame() # initialise
+all_mats <- matrix(data = c(0,0,0,0), ncol = 2, nrow = 2)
+all_dfs <- data.frame()
+
+for(i in 1:length(las)){
+  results_df <- data.frame() # initialise
+  
+  # get data for la
+  la <- unique(subset_df[which(subset_df$la_name == las[i]), "la_name"])
+  county <- unique(subset_df[which(subset_df$la_name == las[i]), "county"])
+  region <- unique(subset_df[which(subset_df$la_name == las[i]), "region"])
+  country <- unique(subset_df[which(subset_df$la_name == las[i]), "country"])
+  force <- unique(subset_df[which(subset_df$la_name == las[i]), "force"])
+  
+  temp_df <- subset_df %>% # subset to la
+    subset(., la_name == la) 
+  
+  if(length(unique(temp_df$ethnicity)) == 2){ # check that there are stops for both white and black individuals
+    
+    # collect stats
+    temp_df <- temp_df %>%
+    group_by(ethnicity) %>%
+    summarise(
+      stopped = n()
+    ) %>%
+    mutate(
+      pop = c(as.numeric(population_ests[which(population_ests$LAD == la), "White"]), 
+              as.numeric(population_ests[which(population_ests$LAD == la), "Black"])),
+      percentage = 100 * (stopped/pop),
+      not_stopped = pop - stopped
+    ) %>%
+    as.data.frame()
+  
+    row.names(temp_df) <- temp_df$ethnicity
+    
+    black <- data.frame("Black" = c("stopped" = temp_df["Black", "stopped"], "not_stopped" = temp_df["Black", "not_stopped"]))
+    
+    white <- data.frame("White" = c("stopped" = temp_df["White", "stopped"], "not_stopped" = temp_df["White", "not_stopped"]))
+    
+    bw_mat <- as.matrix(cbind(black, white)) # matrix for crosstable
+    bw_df <- as.data.frame(bw_mat) # df for custom rr function
+    
+    
+    if(sum(is.na(bw_mat)) == 0){ # if there are figures for all cells, run stats
+      xtab <- CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+      rr <- rr_from_df(bw_df, "Stop & Search")
+      results_df <- data.frame("la" = la,
+                           "county" = county,
+                           "region" = region,
+                           "country" = country,
+                           "force" = force,
+                           "or" = xtab[["fisher.ts"]][["estimate"]][["odds ratio"]], 
+                           "or_ci_low" = xtab[["fisher.ts"]][["conf.int"]][1],
+                           "or_ci_upp" = xtab[["fisher.ts"]][["conf.int"]][2],
+                           "rr" = rr$rr,
+                           "rr_ci_low" = rr$ci_low,
+                           "rr_ci_upp" = rr$ci_upp)
+      
+      all_mats <- all_mats + bw_mat
+      
+    }
+
+  }
+  # if there is not data for both black and white, and/or there are missing values
+  else{
+    results_df <- data.frame("la" = la,
+                         "county" = county,
+                         "region" = region,
+                         "country" = country,
+                         "force" = force,
+                         "or" = NA, 
+                         "or_ci_low" = NA,
+                         "or_ci_upp" = NA,
+                         "rr" = NA,
+                         "rr_ci_low" = NA,
+                         "rr_ci_upp" = NA)
+  }
+
+  
+  all_results <- rbind(all_results, results_df) # add results to all results
+  all_dfs <- as.data.frame(all_mats)
+  cat("\014")
+  print(paste0(i, " of ", length(las), " complete (", round(100 * (i / length(las)),2 ), "%)"))
+}
+```
+
+```{r}
+xtab_all_las <- CrossTable(all_mats, chisq = T, fisher = T, expected = T)
+rr_all_las <- rr_from_df(all_dfs, "stop_search_all")
+```
+
+```{r}
+# get all population estimates that can be used
+
+usable_las <- unique(all_results$la)
+
+pops <- data.frame("white" = as.numeric(population_ests[which(c(population_ests$LAD %in% usable_las)), "White"]), "black" = as.numeric(population_ests[which(c(population_ests$LAD %in% usable_las)), "Black"]))
+
+pops <- pops[which(rowSums(is.na(pops)) == 0),] 
+
+# sum all populations
+pops_sums <- data.frame("white" = sum(pops$white), "black" = sum(pops$black))
+```
+
+
+
+
+```{r fig.height=10}
+library(plotly)
+library(RColorBrewer)
+mycolors <- colorRampPalette(brewer.pal(8, "Set2"))(45)
+
+plot_data <- all_results[order(all_results$or),] # order smallest to biggest
+plot_data$la <- factor(plot_data$la, levels = plot_data$la) 
+
+plot_data <- plot_data[!is.na(plot_data$or),]
+
+p <- ggplot(plot_data, aes(la, or, colour = force)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = or_ci_low, ymax = or_ci_upp)) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_blank()) +
+  scale_colour_manual(values = mycolors) +
+  scale_y_continuous(breaks = c(1,seq(5,60,5))) 
+
+q <- plotly::ggplotly(p)
+q
+```
+
+```{r}
+library(htmlwidgets)
+saveWidget(q, "plot.html", selfcontained = F, libdir = "lib")
+zip("plot.zip", c("plot.html", "lib"))
+```
+
+```{r}
+kut <- subset(subset_df, la_name == "Kingston upon Thames")
+
+temp_df <- kut %>%
+group_by(ethnicity) %>%
+summarise(
+  stopped = n()
+) %>%
+mutate(
+  pop = c(as.numeric(population_ests[which(population_ests$LAD == "Kingston upon Thames"), "White"]), 
+          as.numeric(population_ests[which(population_ests$LAD == "Kingston upon Thames"), "Black"])),
+  percentage = 100 * (stopped/pop),
+  not_stopped = pop - stopped
+) %>%
+as.data.frame()
+
+
+row.names(temp_df) <- temp_df$ethnicity
+black <- data.frame("Black" = c("stopped" = temp_df["Black", "stopped"], "not_stopped" = temp_df["Black", "not_stopped"]))
+
+white <- data.frame("White" = c("stopped" = temp_df["White", "stopped"], "not_stopped" = temp_df["White", "not_stopped"]))
+
+bw_mat <- as.matrix(cbind(black, white)) # matrix for crosstable
+bw_df <- as.data.frame(bw_mat) # df for custom rr function
+
+CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+
+```
+
+```{r}
+lambeth <- subset(subset_df, la_name == "Lambeth")
+
+temp_df <- lambeth %>%
+group_by(ethnicity) %>%
+summarise(
+  stopped = n()
+) %>%
+mutate(
+  pop = c(as.numeric(population_ests[which(population_ests$LAD == "Lambeth"), "White"]), 
+          as.numeric(population_ests[which(population_ests$LAD == "Lambeth"), "Black"])),
+  percentage = 100 * (stopped/pop),
+  not_stopped = pop - stopped
+) %>%
+as.data.frame()
+
+
+row.names(temp_df) <- temp_df$ethnicity
+black <- data.frame("Black" = c("stopped" = temp_df["Black", "stopped"], "not_stopped" = temp_df["Black", "not_stopped"]))
+
+white <- data.frame("White" = c("stopped" = temp_df["White", "stopped"], "not_stopped" = temp_df["White", "not_stopped"]))
+
+bw_mat <- as.matrix(cbind(black, white)) # matrix for crosstable
+bw_df <- as.data.frame(bw_mat) # df for custom rr function
+
+CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+
+```
+
+```{r}
+Gedling <- subset(subset_df, la_name == "Gedling")
+
+temp_df <- Gedling %>%
+group_by(ethnicity) %>%
+summarise(
+  stopped = n()
+) %>%
+mutate(
+  pop = c(as.numeric(population_ests[which(population_ests$LAD == "Gedling"), "White"]), 
+          as.numeric(population_ests[which(population_ests$LAD == "Gedling"), "Black"])),
+  percentage = 100 * (stopped/pop),
+  not_stopped = pop - stopped
+) %>%
+as.data.frame()
+
+
+row.names(temp_df) <- temp_df$ethnicity
+black <- data.frame("Black" = c("stopped" = temp_df["Black", "stopped"], "not_stopped" = temp_df["Black", "not_stopped"]))
+
+white <- data.frame("White" = c("stopped" = temp_df["White", "stopped"], "not_stopped" = temp_df["White", "not_stopped"]))
+
+bw_mat <- as.matrix(cbind(black, white)) # matrix for crosstable
+bw_df <- as.data.frame(bw_mat) # df for custom rr function
+
+CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+
+```
+
+
