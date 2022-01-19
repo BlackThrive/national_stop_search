@@ -1,0 +1,649 @@
+---
+title: "Police stop and search data extraction"
+author: "Black Thrive Global Research Team"
+date: "January 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview 
+
+This script retrieves stop and search data for a specified set of Local Authority Districts (LADs) in Britain over a specified time period. This is achieved in several steps.
+
+1. Coordinates defining the geographic boundary of each LAD are extracted from a datafile obtained from the Office for National Statistics and formatted in a way that can be used by an extraction function to obtain police data
+2. A custom functions reads the coordinates and queries the Police API for stop and search records within each LAD over the specified time period.
+3. Data on which Police Force serves each LAD are added to the data acquired from the function
+
+# Packages
+
+```{r}
+packages <- c('tidyverse',
+              'jsonify', # for reading json
+              'leaflet', # for map
+              'httr', # for http requests
+              'data.table', # for unlisting
+              'rgdal', # for geopackage
+              'sf', # for geopackage
+              'chron' # for dealing with time values
+)
+pkg_notinstall <- packages[!(packages %in% installed.packages()[,"Package"])]
+lapply(pkg_notinstall, install.packages, dependencies = TRUE)
+lapply(packages, library, character.only = TRUE)
+```
+
+# Specify coordinates
+
+This section of the script specifies the coordinates defining the geographic boundary of each LAD and formats them into a list that can be used by the data extraction function. It also adds county, region, and country data to the coordinates where possible.
+
+
+## Read data
+
+```{r}
+# read boundary data
+coords <- geojsonR::FROM_GeoJson("../data/Local_Authority_Districts_(December_2021)_UK_BFE.geojson")
+
+# read list of local authorities
+las <- read_csv("../data/ward_la_county_region_country_2021.csv")
+
+# just select by la and get rid of wards 
+las_no_ward <- las[!duplicated(las$LAD21NM),] %>%
+  select(-c(1:2))
+
+las <- las_no_ward
+
+# list of which forces serve which LADs
+forces_df <- read_csv("../data/la_to_force_2020.csv")
+# just select by la and get rid of CSPs 
+forces_df <- forces_df[!duplicated(forces_df$LAD20NM),] %>%
+  select(-c(4:5))
+
+```
+
+```{r}
+# check that NI LAs are in this coord set
+
+# targets <- c("Causeway Coast and Glens",
+#              "Derry City and Strabane",
+#              "Fermanagh and Omagh",
+#              "Mid Ulster",
+#              "Mid and East Antrim",
+#              "Antrim and Newtownabbey",
+#              "Armagh City, Banbridge and Craigavon",
+#              "Lisburn and Castlereagh",
+#              "Belfast",
+#              "Ards and North Down",
+#              "Newry, Mourne and Down")
+# count <- 0
+# for(i in 1:374){
+#   if(!is.na(match(coords[["features"]][[i]][["properties"]][["LAD21NM"]], targets))){
+#     count <- count + 1
+#   }
+# }
+# count
+```
+
+## Format coordinates
+
+Here the coordinate list is structured into the appropriate format for the extraction function, adding data on county, region, and country. The script also records missing elements of data (e.g., missing counties, regions, etc.) for manual inspection.
+
+```{r}
+# intialise vector for extracted coordinates
+coords_extracted <- vector(mode = "list", length = length(coords[["features"]]))
+
+# intialise data frame to record missing data
+missing_data_df <- data.frame(setNames(rep(list(NA), 5), c("Index","Name","County_missing","Region_missing","Country_missing")))
+
+for(i in 1:length(coords[["features"]])){
+  coords_extracted[[i]][["la_name"]] <- coords[["features"]][[i]][["properties"]][["LAD21NM"]]
+  coords_extracted[[i]][["la_code"]] <- coords[["features"]][[i]][["properties"]][["LAD21CD"]]
+  #coords_extracted[[i]][["coords"]] <- lapply(coords_extracted[[i]][["coords"]][[1]], unlist)
+  
+  # add la, county, region, and country names
+  try(
+    coords_extracted[[i]][["county"]] <- as.character(las[which(las$LAD21CD == coords_extracted[[i]][["la_code"]]), "CTY21NM"])
+  )
+  try(
+    coords_extracted[[i]][["region"]] <- as.character(las[which(las$LAD21CD == coords_extracted[[i]][["la_code"]]), "RGN21NM"])
+  )
+  try(
+    coords_extracted[[i]][["country"]] <- as.character(las[which(las$LAD21CD == coords_extracted[[i]][["la_code"]]), "CTRY21NM"])
+  )
+  try(
+    coords_extracted[[i]][["force"]] <- as.character(forces_df[which(forces_df[,"LAD20CD"] == coords_extracted[[i]][["la_code"]]), "PFA20NM"])
+  )
+  
+  if(coords_extracted[[i]][["force"]] == "character(0)"){
+    coords_extracted[[i]][["force"]] <- NA
+  }
+  names(coords_extracted)[i] <- coords_extracted[[i]][["la_name"]]
+  
+  coords_extracted[[i]][["coords"]] <- coords[["features"]][[i]][["geometry"]][["coordinates"]]
+
+  # report which LAs have missing values 
+  if(is.na(coords_extracted[[i]][["county"]])){
+    #print(paste0(names(coords_extracted)[i], " county missing (", i, ")"))
+    missing_data_df[i, "Index"] <- i
+    missing_data_df[i, "Name"] <- coords_extracted[[i]][["la_name"]]
+    missing_data_df[i, "Country"] <- coords_extracted[[i]][["country"]]
+    missing_data_df[i, "County_missing"] <- 1
+  }
+  if(is.na(coords_extracted[[i]][["region"]])){
+    #print(paste0(names(coords_extracted)[i], " region missing (", i, ")"))
+    missing_data_df[i, "Index"] <- i
+    missing_data_df[i, "Name"] <- coords_extracted[[i]][["la_name"]]
+    missing_data_df[i, "Country"] <- coords_extracted[[i]][["country"]]
+    missing_data_df[i, "Region_missing"] <- 1
+  }
+  if(is.na(coords_extracted[[i]][["country"]])){
+    #print(paste0(names(coords_extracted)[i], " country missing (", i, ")"))
+    missing_data_df[i, "Index"] <- i
+    missing_data_df[i, "Name"] <- coords_extracted[[i]][["la_name"]]
+    missing_data_df[i, "Country"] <- coords_extracted[[i]][["country"]]
+    missing_data_df[i, "Country_missing"] <- 1
+  }
+  if(is.na(coords_extracted[[i]][["force"]])){
+    #print(paste0(names(coords_extracted)[i], " country missing (", i, ")"))
+    missing_data_df[i, "Index"] <- i
+    missing_data_df[i, "Name"] <- coords_extracted[[i]][["la_name"]]
+    missing_data_df[i, "Country"] <- coords_extracted[[i]][["country"]]
+    missing_data_df[i, "Force_missing"] <- 1
+  }
+
+  
+  for(j in 1:length(coords_extracted[[i]][["coords"]])){
+    if(is.list(coords_extracted[[i]][["coords"]][[j]])){
+      coords_extracted[[i]][["coords"]] <- lapply(coords_extracted[[i]][["coords"]][[1]], unlist)
+    }
+    
+  
+  #coords_extracted[[i]][["coords"]][[j]] <- as.data.frame(coords_extracted[[i]][["coords"]][[j]])
+  #colnames(coords_extracted[[i]][["coords"]][[j]]) <- c("long","lat")
+  }
+  
+  
+}
+
+# drop rows from missing_data_df that are NA
+missing_data_df <- missing_data_df[rowSums(is.na(missing_data_df)) != ncol(missing_data_df),]
+
+# unlist coordinates to make them correct format for function
+coords_extracted_unlisted <- coords_extracted
+
+# make coords dataframe and label colnames
+for(i in 1:length(coords_extracted_unlisted)){
+  for(j in 1:length(coords_extracted_unlisted[[i]][["coords"]])){
+      coords_extracted_unlisted[[i]][["coords"]][[j]] <- as.data.frame(coords_extracted_unlisted[[i]][["coords"]][[j]])
+      colnames(coords_extracted_unlisted[[i]][["coords"]][[j]]) <- c("long","lat")
+  }
+}
+
+## Reorder coordinates so that multiple polygon areas are processed last
+
+# This is a non-essential step that helps with processing. It orders the coordinates so that those LADs with multiple coordinate polygons (e.g. those LADs that include many islands) are extracted last. This helps ensure that, in the case of an extraction failure, there is a high likelihood that most LADs have already been acquired. To elaborate, because multiple polygon areas take a long time to check and extract, it is preferable that they are extracted last, after the bulk of other data is already acquired. Not doing so would result in long processing times with little extraction process if there are failures.
+
+# reorder coord list so that multiple polygon areas are last
+coord_lengths <- matrix(nrow = length(coords_extracted_unlisted), ncol = 2)
+# make list of lengths of each element in coord list
+for(i in 1:length(coords_extracted_unlisted)){
+  coord_lengths[i,1] <- i
+  coord_lengths[i,2] <- length(coords_extracted_unlisted[[i]][["coords"]])
+}
+# order coord indexes based on coord element length
+coord_lengths_ordered <- coord_lengths[order(coord_lengths[,2]),]
+#coord_lengths_ordered
+
+# order coord list based on ordered coord indexes
+ordered_coords <- list()
+for(i in 1:length(coords_extracted_unlisted)){
+  ordered_coords[[i]] <- coords_extracted_unlisted[[coord_lengths_ordered[i]]]
+  names(ordered_coords)[i] <- names(coords_extracted_unlisted)[coord_lengths_ordered[i]]
+}
+
+save(ordered_coords, file = "../data/ordered_coords.Rdata")
+
+```
+
+## Add missing force names for Northern Ireland, Scotland, and Northamptonshire
+
+By checking 'missing_data_df' and sorting by 'Force_missing' column, it is possible to quickly identify that the areas that are missing data are Scotland, Northern Ireland, and Northamptonshire. Scotland and NI are missing because they have their own Polcie services. Northamptonshire is missing because of a mismatch of census codes with the newly defined LADs North and West Northamptonshire. The code below manually adds the missing data.
+
+```{r}
+for(i in 1:length(ordered_coords)){
+  if(is.na(ordered_coords[[i]][["force"]])){
+    if(ordered_coords[[i]][["country"]] == "Scotland"){
+      ordered_coords[[i]][["force"]] <- "Police Scotland"
+    }
+    else if(ordered_coords[[i]][["country"]] == "Northern Ireland"){
+      ordered_coords[[i]][["force"]] <- "Police Service of Northern Ireland"
+    }
+    else{
+      ordered_coords[[i]][["force"]] <- "Northamptonshire"
+    }
+  }
+}
+
+# check that there are no more missing forces
+count <- 0
+for(i in 1:length(ordered_coords)){
+  if(is.na(ordered_coords[[i]][["force"]])){
+    count <- count + 1
+  }
+}
+print(paste0(count, " missing forces remain"))
+```
+
+```{r}
+# # check depth of coord lists 
+# count <- 0
+# for(i in 1:length(coords_extracted_unlisted)){
+#   for(j in 1:length(coords_extracted_unlisted[[i]][["coords"]])){
+#     if(is.list(coords_extracted_unlisted[[i]][["coords"]][[j]][[1]])){
+#       count <- count + 1
+#     }
+#   }
+# }
+# count
+# new_coords <- coords_extracted_unlisted
+```
+
+
+# Extraction function
+
+This part of the script specifies and runs the function used to extract data from the Police API. It takes the formatted coordinates acquired above and queries the Police API via POST request for stop and search data for each LAD over a period of time specified by the user.
+
+```{r}
+# Acquire Stop and Search data for a list of Local Authority (LA) areas over a 
+# time period. 
+
+# Arguments
+
+## coord_list: List of areas of interest. Each element of list must be a data 
+## frame with column names "lat" and "long". A separate function is available
+## to create this list.
+
+## most_recent_month: Numeric value specifying most recent month (e.g., 8 for August)
+
+## most_recent_year (YYYY): Numeric value specifying most recent year (e.g., 2021)
+
+## If one or both of most_recent_month/year is not specified, the function will 
+## query Police API for the most recent update and use this as a start point.
+
+## num_months_backwards: Number of months backwards for which data are required. 
+
+## wait_time: Number of seconds to wait between retries of unsuccessful requests.
+
+## max_tries: Maximum number of retries following an unsuccessful request. Default 
+## is 'Inf' because usually all data are desired and unsuccessful requests are most
+## likely timeouts that can be resolved by retrying.
+
+# Value
+
+## Output is a list containing 'results' and 'missing_entries'. 'results' contains
+## the queried data in a dataframe. 'missing_entries' contains a list of LAs and
+## their corresponding index in coord_list for which no data records exist for
+## the specified time period.
+
+la_search_police_api <- function(coord_list, 
+                                 most_recent_month = NULL, 
+                                 most_recent_year = NULL, 
+                                 num_months_backwards = NULL, 
+                                 back_to_month = NULL,
+                                 back_to_year = NULL,
+                                 wait_time = 5, 
+                                 max_tries = Inf){
+  # initialise dataframes
+  overall_output <- data.frame()
+  no_entries_df <- data.frame(setNames(rep(list(NA), 2), c("Index","Name")))
+  
+  # h loop iterates over LAs
+  for(h in 1:length(coord_list)){
+    print(paste0("Started area ", h)) # report start (useful for debugging)
+    
+    la_name <- coord_list[[h]][["la_name"]] # LA name
+    la_code <- coord_list[[h]][["la_code"]] # la census code
+    
+    county <- coord_list[[h]][["county"]] # county name
+    if(is_empty(county)){
+      county <- NA # set NA if missing
+    }
+    
+    region <- coord_list[[h]][["region"]] # region name
+    if(is_empty(region)){
+      region <- NA # set NA if missing
+    }
+    
+    country <- coord_list[[h]][["country"]] # country name
+    
+    force <- coord_list[[j]][["force"]]
+    
+    # get most recent update if most_recent data not specified
+    if(is.null(most_recent_month) || is.null(most_recent_year)){ 
+      # get most recent update from API:
+      date <- httr::content(
+        httr::GET("https://data.police.uk/api/crimes-street-dates"))[[1]][["date"]] 
+      most_recent_month <- as.numeric(substr(date,6,7))
+      most_recent_year <- as.numeric(substr(date,1,4))
+    }
+    else{
+      most_recent_month <- most_recent_month
+      most_recent_year <- most_recent_year
+    }
+    
+    if(is.null(num_months_backwards)){
+      num_months_backwards <- 1 + (12 * (most_recent_year - back_to_year)) + (most_recent_month - back_to_month)
+    }
+    
+    area_output <- data.frame() # initialise area output df
+    number_months_acquired <- 0 # initialise number of months acquired counter
+    
+    # i loop iterates over the months required 
+    for(i in 1:num_months_backwards){
+      month_output <- data.frame()
+      # format date to what is needed for API query ("yyyy-mm")
+      if(i == 1){ # set values for first iteration
+        month_num <- most_recent_month
+        year <- most_recent_year
+      }
+      else{ # subsequent iterations
+        month_num <- month_num - 1 # backwards a month each iteration
+        if(month_num %% 12 == 0){ # if reach a new year, start months from 12 again
+          month_num <- 12
+          year <- year - 1 # backwards a year
+        }
+      }
+      if(month_num < 10){ # paste 0 for months lower than 10
+        month <- paste("0", month_num, sep = "")
+      }
+      else{
+        month <- month_num
+      }
+      
+      date <- paste(year, "-", month, sep = "") # combine dates into one string
+      
+      # j loop iterates over the coordinate sets within each LA and creates a
+      # polygon string to be searched, and then submits the query.
+      # Most LAs have only one coordinate set, but some have multiple (e.g., 
+      # those that include islands). The function therefore needs to search 
+      # each coordinate set within a LA separately.
+      coord_string <- c() # initialise vector for coord string
+      for(j in 1:length(coord_list[[h]][["coords"]])){
+        # set this iteration's coordinate set:
+        area_coords <- coord_list[[h]][["coords"]][[j]]
+        # combine coord strings into format required by API (much quicker than looping):
+        coord_string <- paste0(area_coords$lat,",",area_coords$long, collapse = ":") 
+        
+        # create body for post request
+        body <- list("poly" = coord_string,
+                     "date" = date)
+        # search API for this coordinate set and date:
+        post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body)
+        
+        # if search quota reached, break (shouldn't be an issue but just in case)
+        if(post_request[["status_code"]] == 429){
+          print("Quota reached. Abandoning request.")
+          break
+        }
+        else{
+          # if the request didn't succeed, wait some time ('wait_time') and 
+          # keep trying up until 'max_tries' attempts.
+          attempt <- 1
+          while(post_request[["status_code"]] != 200 && attempt <= max_tries){ 
+            print(paste0("Server error. Trying again (", attempt,")"))
+            Sys.sleep(wait_time) # wait some time before trying again
+            try(
+              post_request <- httr::POST("https://data.police.uk/api/stops-street?", body = body)
+            )
+            # if search quota reached, break (shouldn't be an issue but just in case)
+            if(post_request[["status_code"]] == 429){ 
+              print("Quota reached. Abandoning request.")
+              break
+            }
+            attempt <- attempt + 1
+          }
+        }
+        
+        # get data from results of query
+        df <- httr::content(post_request) 
+        # unlist data and convert to dataframe:
+        df_2 <- lapply(df, unlist)
+        df_3 <- do.call(bind_rows, df_2)
+        df_3$coord_set <- j # record which coordinate set data is from
+        
+        # add results of this coordinate set iteration (j) to the output for 
+        # this month iteration (i). Use bindrows for (high) possibility that columns
+        # from different iterations will be in different order/missing
+        #area_output <- bind_rows(area_output, df_3) 
+        month_output <- bind_rows(month_output, df_3)
+        
+        cat("\014") # clear console 
+        # report overall (i.e., LA) progress
+        print(paste0("Working... LA ", h, " of ", length(coord_list), 
+                     " (", 
+                     round(100 * (h / length(coord_list)), 2), "%)"))
+        # report month progress
+        print(paste0("Working... Month ", i, " of ", num_months_backwards, 
+                     " (", date, ")"))
+        # report coordinate set progress
+        print(paste0("Working... ", j, " of ", 
+                     length(coord_list[[h]][["coords"]]), 
+                     " coordinate sets retrieved"))
+
+        
+      } # coordinate set loop (j) ends
+    
+      # if records have been acquired, increase months count
+      if(nrow(month_output) > 0){
+         number_months_acquired <- number_months_acquired + 1
+      }
+      
+      # add data from this month to overall LA output
+      area_output <- bind_rows(area_output, month_output)
+      
+    } # month loop (i) ends
+    
+    
+    
+    # If there were no records for this LA, record the LA iteration number
+    # and name, then proceed to the next LA
+    if(nrow(area_output) == 0){
+      if(is.na(no_entries_df[1,1])){ # if first occurrence, replaces NAs 
+        no_entries_df[1,] <- c(h, la_name)
+      }
+      else{ # rbind subsequent occurrences
+        no_entries_df <- rbind(no_entries_df, c(h, la_name))        
+      }
+      print(paste0("No records for ", la_name))
+      next # proceed to next LA
+    }
+    
+    # add columns for LA name, county, region, country, and the iteration index
+    # for the LA (useful for quickly identifying which LA the function reached 
+    # if it breaks unexpectedly)
+    area_output$la_name <- la_name
+    area_output$la_code <- la_code
+    area_output$county <- county
+    area_output$region <- region
+    area_output$country <- country
+    area_output$index <- h
+    area_output$number_months_acquired <- number_months_acquired
+    area_output$proportion_months_acquired <- number_months_acquired / num_months_backwards
+    area_output$force <- force
+    
+    # move index and location data to front of df
+    area_output <- area_output %>%
+      select(index, la_name, la_code, county, region, country, everything()) %>%
+      relocate(location.longitude, .before = location.latitude) # put long next to lat
+    overall_output <- bind_rows(overall_output, area_output)
+    
+    # separate datetime into 2 columns
+    
+    area_output$time <- substr(area_output$datetime, 12, 19)
+    area_output$date <- as.Date(substr(area_output$datetime, 1, 10))
+    # set as time
+    area_output$time <- chron(times. =  df$time, format = c(times = "hh:mm:ss"))
+    
+    # create a temporary output list and save it every time a LA completes, so
+    # that there is a backup in case function breaks. Saves to same folder as
+    # script
+    save_progress <- list(result = overall_output,
+                          missing_entries = no_entries_df)
+    save(save_progress, file = "./save_progress.Rdata")
+  } # LA loop (h) ends
+  
+  # return output. 'result' is the data. 'missing_entries' provides a list of
+  # LAs that are missing from the data because there were no records for the 
+  # LA in the specified time period.
+  return(list(result = overall_output,
+              missing_entries = no_entries_df))
+}
+```
+
+
+```{r}
+# for calculating nubmer of months to go back. now implemented in extraction function
+count_months <- function(start_month = NULL, start_year = NULL, end_month = NULL, end_year = NULL){
+  number_months_years <- 12 * (start_year - end_year)
+  number_months_months <- start_month - end_month
+  total_months <- number_months_years + number_months_months
+  return(total_months)
+}
+
+count_months(start_month = 11, start_year = 2021, end_month = 12, end_year = 2018)
+```
+
+```{r}
+# for testing, select just one force (in this case Cleveland)
+indexes <- c()
+for(i in 1:length(ordered_coords)){
+  if(ordered_coords[[i]][["force"]] == "Cleveland"){
+    indexes <- append(indexes, i)
+  }
+}
+just_cleveland <- ordered_coords[indexes]
+```
+
+## Run function
+
+```{r}
+# get rid of known missing entries for this period to reduce processing time next run
+# load(file = "../data/stop_search_all_las_12_months_to_oct_21.Rdata")
+# known_missing_entries <- data[[2]]
+# ordered_coords_missing_removed <- within(ordered_coords, rm(list = known_missing_entries$Name))
+
+
+test_coords <- ordered_coords[1:3]
+data <- la_search_police_api(just_cleveland, back_to_month = 12, back_to_year = 2018)
+
+df <- data[[1]] # extract the results data frame
+
+# save R object
+#save(data, file = "../data/stop_search_all_las_12_months_to_oct_21.Rdata")
+```
+
+
+```{r}
+# quick load of data collected from above function
+# load(file = "../data/all_las_to_oct_21_incl_ni.Rdata")
+# df <- data_new_coords[[1]]
+```
+
+## Add Forces
+
+Here data on which Force serves each LAD is added. 
+
+```{r}
+# forces <- jsonify::from_json("../data/la_to_force.json")
+# forces_df <- forces[["features"]][["attributes"]]
+forces_df <- read_csv("../data/la_to_force_2020.csv")
+# just select by la and get rid of CSPs 
+forces_df <- forces_df[!duplicated(forces_df$LAD20NM),] %>%
+  select(-c(4:5))
+
+df$force <- c()
+for(i in 1:nrow(df)){
+  try(
+    df$force[i] <- forces_df[which(forces_df[,"LAD20CD"] == df[i, "la_code"]), "PFA20NM"]
+  )
+  if(i %% 100 == 0){
+      cat("\014") # clear console 
+      print(paste0(i, " of ", nrow(df), " complete (", round(100 * (i / nrow(df)), 2),"%)"))
+  }
+}
+
+unique(df$force)
+unique(df$la_code)
+
+which(df$force == "Dorset Dorset Dorset")
+28018
+
+try(
+missing_forces <- data.frame("la_name" = df[which(df$force == "character(0)"),"la_name"],
+                             "la_code" =df[which(df$force == "character(0)"),"la_code"],
+                             "county" = df[which(df$force == "character(0)"),"county"],
+                             "region" = df[which(df$force == "character(0)"),"region"],
+                             "country" = df[which(df$force == "character(0)"),"country"]
+)
+)
+
+```
+
+### Check for missing forces and manually add them
+
+This section checks whether there are any LADs which do not have a force allocated, and then adds them manually
+
+```{r}
+# check which forces are missing
+missing_forces <- missing_forces[!duplicated(missing_forces$la_name),]
+unique(missing_forces$country)
+sum(missing_forces$country == "England")
+```
+
+```{r}
+for(i in 1:nrow(missing_forces)){
+  if(missing_forces$country[i] == "Scotland"){
+    missing_forces$force[i] <- "Police Scotland"
+  }
+  else if(missing_forces$country[i] == "Northern Ireland"){
+    missing_forces$force[i] <- "Police Service of Northern Ireland"
+  }
+  else{
+    missing_forces$force[i] <- "Northamptonshire"
+  }
+}
+
+for(i in 1:nrow(missing_forces)){
+  df$force[which(df$la_name == missing_forces$la_name[i])] <- missing_forces$force[i]
+}
+unique(df$force)
+
+class(df$force)
+
+df$force <- as.character(df$force)
+
+save(df, file = "../data/national_dataset_with_forces.Rdata")
+write_csv(df, file = "../data/national_dataset_with_forces.csv")
+```
+
+## Separate date/time into separate columns
+
+Finally, the data/time of stop is separated from one column into two separate columns
+
+```{r}
+
+#data <- read_csv(file = "../data/national_dataset_with_forces.csv")
+
+df$time <- substr(df$datetime, 12, 19)
+df$date <- as.Date(substr(df$datetime, 1, 10))
+
+df$time <- chron(times. =  df$time, format = c(times = "hh:mm:ss"))
+
+df <- df[order(df$date,df$time),]
+
+#write_csv(df, file = "../data/national_la_nameset_with_forces.csv")
+
+#unique(df$date)
+```
+
