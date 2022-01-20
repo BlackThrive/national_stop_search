@@ -472,18 +472,22 @@ la_search_police_api <- function(coord_list,
     area_output$proportion_months_acquired <- number_months_acquired / num_months_backwards
     area_output$force <- force
     
-    # move index and location data to front of df
-    area_output <- area_output %>%
-      select(index, la_name, la_code, county, region, country, everything()) %>%
-      relocate(location.longitude, .before = location.latitude) # put long next to lat
-    overall_output <- bind_rows(overall_output, area_output)
-    
     # separate datetime into 2 columns
-    
     area_output$time <- substr(area_output$datetime, 12, 19)
     area_output$date <- as.Date(substr(area_output$datetime, 1, 10))
     # set as time
-    area_output$time <- chron(times. =  df$time, format = c(times = "hh:mm:ss"))
+    #area_output$time <- chron(times. =  df$time, format = c(times = "hh:mm:ss"))
+    
+    # move index and location data to front of df
+    area_output <- area_output %>%
+      select(index, la_name, la_code, county, region, country, everything()) %>%
+      relocate(location.longitude, .before = location.latitude) %>% # put long next to lat
+      relocate(date, .after = datetime) %>% 
+      relocate(time, .after = date)
+
+    overall_output <- bind_rows(overall_output, area_output)
+    
+
     
     # create a temporary output list and save it every time a LA completes, so
     # that there is a backup in case function breaks. Saves to same folder as
@@ -516,13 +520,13 @@ la_search_police_api <- function(coord_list,
 
 ```{r}
 # # for testing, select just one force (in this case Cleveland)
-# indexes <- c()
-# for(i in 1:length(ordered_coords)){
-#   if(ordered_coords[[i]][["force"]] == "Cleveland"){
-#     indexes <- append(indexes, i)
-#   }
-# }
-# just_cleveland <- ordered_coords[indexes]
+indexes <- c()
+for(i in 1:length(ordered_coords)){
+  if(ordered_coords[[i]][["force"]] == "Cleveland"){
+    indexes <- append(indexes, i)
+  }
+}
+just_cleveland <- ordered_coords[indexes]
 ```
 
 ## Run function
@@ -535,10 +539,10 @@ la_search_police_api <- function(coord_list,
 
 
 test_coords <- ordered_coords[1:3]
-data <- la_search_police_api(just_ordered_coords, back_to_month = 12, back_to_year = 2018)
+data <- la_search_police_api(just_cleveland, back_to_month = 12, back_to_year = 2018)
 
 df <- data[[1]] # extract the results data frame
-
+df <- df[order(df$date,df$time),]
 # save R object
 #save(data, file = "../data/stop_search_all_las_12_months_to_oct_21.Rdata")
 ```
