@@ -503,26 +503,26 @@ la_search_police_api <- function(coord_list,
 
 
 ```{r}
-# for calculating nubmer of months to go back. now implemented in extraction function
-count_months <- function(start_month = NULL, start_year = NULL, end_month = NULL, end_year = NULL){
-  number_months_years <- 12 * (start_year - end_year)
-  number_months_months <- start_month - end_month
-  total_months <- number_months_years + number_months_months
-  return(total_months)
-}
-
-count_months(start_month = 11, start_year = 2021, end_month = 12, end_year = 2018)
+# # for calculating nubmer of months to go back. now implemented in extraction function
+# count_months <- function(start_month = NULL, start_year = NULL, end_month = NULL, end_year = NULL){
+#   number_months_years <- 12 * (start_year - end_year)
+#   number_months_months <- start_month - end_month
+#   total_months <- number_months_years + number_months_months
+#   return(total_months)
+# }
+# 
+# count_months(start_month = 11, start_year = 2021, end_month = 12, end_year = 2018)
 ```
 
 ```{r}
-# for testing, select just one force (in this case Cleveland)
-indexes <- c()
-for(i in 1:length(ordered_coords)){
-  if(ordered_coords[[i]][["force"]] == "Cleveland"){
-    indexes <- append(indexes, i)
-  }
-}
-just_cleveland <- ordered_coords[indexes]
+# # for testing, select just one force (in this case Cleveland)
+# indexes <- c()
+# for(i in 1:length(ordered_coords)){
+#   if(ordered_coords[[i]][["force"]] == "Cleveland"){
+#     indexes <- append(indexes, i)
+#   }
+# }
+# just_cleveland <- ordered_coords[indexes]
 ```
 
 ## Run function
@@ -535,7 +535,7 @@ just_cleveland <- ordered_coords[indexes]
 
 
 test_coords <- ordered_coords[1:3]
-data <- la_search_police_api(just_cleveland, back_to_month = 12, back_to_year = 2018)
+data <- la_search_police_api(just_ordered_coords, back_to_month = 12, back_to_year = 2018)
 
 df <- data[[1]] # extract the results data frame
 
@@ -550,100 +550,4 @@ df <- data[[1]] # extract the results data frame
 # df <- data_new_coords[[1]]
 ```
 
-## Add Forces
-
-Here data on which Force serves each LAD is added. 
-
-```{r}
-# forces <- jsonify::from_json("../data/la_to_force.json")
-# forces_df <- forces[["features"]][["attributes"]]
-forces_df <- read_csv("../data/la_to_force_2020.csv")
-# just select by la and get rid of CSPs 
-forces_df <- forces_df[!duplicated(forces_df$LAD20NM),] %>%
-  select(-c(4:5))
-
-df$force <- c()
-for(i in 1:nrow(df)){
-  try(
-    df$force[i] <- forces_df[which(forces_df[,"LAD20CD"] == df[i, "la_code"]), "PFA20NM"]
-  )
-  if(i %% 100 == 0){
-      cat("\014") # clear console 
-      print(paste0(i, " of ", nrow(df), " complete (", round(100 * (i / nrow(df)), 2),"%)"))
-  }
-}
-
-unique(df$force)
-unique(df$la_code)
-
-which(df$force == "Dorset Dorset Dorset")
-28018
-
-try(
-missing_forces <- data.frame("la_name" = df[which(df$force == "character(0)"),"la_name"],
-                             "la_code" =df[which(df$force == "character(0)"),"la_code"],
-                             "county" = df[which(df$force == "character(0)"),"county"],
-                             "region" = df[which(df$force == "character(0)"),"region"],
-                             "country" = df[which(df$force == "character(0)"),"country"]
-)
-)
-
-```
-
-### Check for missing forces and manually add them
-
-This section checks whether there are any LADs which do not have a force allocated, and then adds them manually
-
-```{r}
-# check which forces are missing
-missing_forces <- missing_forces[!duplicated(missing_forces$la_name),]
-unique(missing_forces$country)
-sum(missing_forces$country == "England")
-```
-
-```{r}
-for(i in 1:nrow(missing_forces)){
-  if(missing_forces$country[i] == "Scotland"){
-    missing_forces$force[i] <- "Police Scotland"
-  }
-  else if(missing_forces$country[i] == "Northern Ireland"){
-    missing_forces$force[i] <- "Police Service of Northern Ireland"
-  }
-  else{
-    missing_forces$force[i] <- "Northamptonshire"
-  }
-}
-
-for(i in 1:nrow(missing_forces)){
-  df$force[which(df$la_name == missing_forces$la_name[i])] <- missing_forces$force[i]
-}
-unique(df$force)
-
-class(df$force)
-
-df$force <- as.character(df$force)
-
-save(df, file = "../data/national_dataset_with_forces.Rdata")
-write_csv(df, file = "../data/national_dataset_with_forces.csv")
-```
-
-## Separate date/time into separate columns
-
-Finally, the data/time of stop is separated from one column into two separate columns
-
-```{r}
-
-#data <- read_csv(file = "../data/national_dataset_with_forces.csv")
-
-df$time <- substr(df$datetime, 12, 19)
-df$date <- as.Date(substr(df$datetime, 1, 10))
-
-df$time <- chron(times. =  df$time, format = c(times = "hh:mm:ss"))
-
-df <- df[order(df$date,df$time),]
-
-#write_csv(df, file = "../data/national_la_nameset_with_forces.csv")
-
-#unique(df$date)
-```
 
