@@ -5,9 +5,9 @@
   </a>
   </div>
   
-# TITLE
+# National Stop and Search
  
-## National Stop and Search
+## Overview
 
 This Rproject contains the scripts and data necessary to produce the methods, procedure, and results for Black Thrive Global's National Stop and Search analysis. 
 
