@@ -11,7 +11,7 @@
 
 This Rproject contains the scripts and data necessary to produce the methods, procedure, and results for Black Thrive Global's National Stop and Search analysis. 
 
-The aim of this analysis is to explore quantify racial disparities in the use of stop and search at national and local authority levels. The project is in ongoing development and the code and statistics presented are subject to change.
+The aim of this analysis is to quantify racial disparities in the use of stop and search at national and local authority levels. The project is in ongoing development and the code and statistics presented are subject to change.
 
 ## Requirements
 
