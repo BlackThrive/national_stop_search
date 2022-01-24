@@ -1,0 +1,323 @@
+---
+title: "Analysis for blog content"
+author: "Black Thrive Global"
+date: "January 2022"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(include = FALSE)
+```
+
+```{r include = TRUE, echo = FALSE}
+htmltools::img(src = knitr::image_uri("../images/btg_logo.png"),
+               alt = 'logo',
+               style = 'position: absolute; top:0; right:0; padding-right:10px; padding-top: 10px; height:118px; width:125px')
+```
+
+
+
+```{r class.source = "fold-show"}
+library(tidyverse)
+library(gmodels) # CrossTable()
+library(epitools) # riskratio
+library(kableExtra)
+library(DT)
+```
+
+# Stop and Search disparity by Local Authority
+
+To view the code that produces the statistics below, click the 'Code' buttons on the right.
+
+```{r include = TRUE, results=FALSE}
+# function for calculating relative risk ratio from contingency tables 
+rr_from_df <- function(df, name){
+  # function takes df, transforms in matrix, and creates risk
+  # ratios and associated confidence intervals
+  # 'name' is the desired name of the indicator
+  mat <- matrix(c(df[2,2],
+                  df[2,1],
+                  df[1,2],
+                  df[1,1]), 2, 2)
+  df_out <- data.frame("indicator" = name,
+                     "rr" = riskratio(mat)[["measure"]][2,1],
+                     "ci_low" = riskratio(mat)[["measure"]][2,2],
+                     "ci_upp" = riskratio(mat)[["measure"]][2,3])
+  return(df_out)
+}
+```
+
+```{r include = TRUE, results=FALSE}
+data <- read.csv("../data/national_dataset_with_forces.csv") # data acquired from our extraction function
+
+data_no_ni <- subset(data, country != "Northern Ireland") # don't consider NI because don't currently have population data
+
+population_ests <- read.csv("../data/la_pop_estimates_2021_2.csv") # population estimates
+# translate ONS missing estimate characters to NAs
+population_ests <- population_ests %>%
+  mutate(across(ncol(population_ests)), na_if(., "!")) %>%
+  mutate(across(ncol(population_ests)), na_if(., "-")) %>%
+  mutate(across(ncol(population_ests)), na_if(., "~"))
+```
+
+```{r include = TRUE, results=FALSE}
+df <- data_no_ni
+# collapse ethnicity 
+df$self_defined_ethnicity <- as.factor(df$self_defined_ethnicity)
+df$self_defined_ethnicity <- fct_collapse(df$self_defined_ethnicity,
+                                          Asian = c("Asian/Asian British - Any other Asian background",
+                                          "Asian/Asian British - Bangladeshi",
+                                          "Asian/Asian British - Chinese",
+                                          "Asian/Asian British - Indian",
+                                          "Asian/Asian British - Pakistani"),
+                                          Black = c("Black/African/Caribbean/Black British - African",
+                                          "Black/African/Caribbean/Black British - Any other Black/African/Caribbean background",
+                                          "Black/African/Caribbean/Black British - Caribbean"),
+                                          Mixed = c("Mixed/Multiple ethnic groups - Any other Mixed/Multiple ethnic background",
+                                          "Mixed/Multiple ethnic groups - White and Asian",
+                                          "Mixed/Multiple ethnic groups - White and Black African",
+                                          "Mixed/Multiple ethnic groups - White and Black Caribbean"),
+                                          Other = c("Other ethnic group - Any other ethnic group",
+                                          "Other ethnic group - Not stated"),
+                                          White = c("White - Any other White background",
+                                          "White - English/Welsh/Scottish/Northern Irish/British",
+                                          "White - Irish")
+)
+
+# take just black and white
+subset_df <- subset(df, self_defined_ethnicity == "White" | self_defined_ethnicity == "Black")
+subset_df$self_defined_ethnicity <- factor(subset_df$self_defined_ethnicity, levels = c("White", "Black"))
+subset_df <- subset_df %>%
+  rename(
+    ethnicity = self_defined_ethnicity # rename
+  )
+
+# fix misspelling of Rhondda Cynon Taff
+subset_df$la_name[which(subset_df$la_name == "Rhondda Cynon Taf")] <- "Rhondda Cynon Taff"
+```
+
+
+```{r include = TRUE, results=FALSE}
+# The code below creates a contingency table for each LAD and runs chi-square and Fisher's exact tests on it. 
+# It also creates an overall contingency table on which to base combined statistics.
+
+las <- unique(subset_df$la_name) # get la names from the dataset
+all_results <- data.frame() # initialise
+all_mats <- matrix(data = c(0,0,0,0), ncol = 2, nrow = 2)
+all_dfs <- data.frame()
+count <- 0
+
+for(i in 1:length(las)){
+  results_df <- data.frame() # initialise
+  
+  # get data for la
+  la <- unique(subset_df[which(subset_df$la_name == las[i]), "la_name"])
+  county <- unique(subset_df[which(subset_df$la_name == las[i]), "county"])
+  region <- unique(subset_df[which(subset_df$la_name == las[i]), "region"])
+  country <- unique(subset_df[which(subset_df$la_name == las[i]), "country"])
+  force <- unique(subset_df[which(subset_df$la_name == las[i]), "force"])
+  
+  temp_df <- subset_df %>% # subset to la
+    subset(., la_name == la) 
+  
+  if(length(unique(temp_df$ethnicity)) == 2){ # check that there are stops for both white and black individuals
+    
+    # collect stats
+    temp_df <- temp_df %>%
+    group_by(ethnicity) %>%
+    summarise(
+      stopped = n()
+    ) %>%
+    mutate(
+      pop = c(as.numeric(population_ests[which(population_ests$LAD == la), "White"]), 
+              as.numeric(population_ests[which(population_ests$LAD == la), "Black"])),
+      percentage = 100 * (stopped/pop),
+      not_stopped = pop - stopped
+    ) %>%
+    as.data.frame()
+  
+    row.names(temp_df) <- temp_df$ethnicity
+    
+    black <- data.frame("Black" = c("stopped" = temp_df["Black", "stopped"], "not_stopped" = temp_df["Black", "not_stopped"]))
+    
+    white <- data.frame("White" = c("stopped" = temp_df["White", "stopped"], "not_stopped" = temp_df["White", "not_stopped"]))
+    
+    bw_mat <- as.matrix(cbind(black, white)) # matrix for crosstable
+    bw_df <- as.data.frame(bw_mat) # df for custom rr function
+    
+    
+    if(sum(is.na(bw_mat)) == 0){ # if there are figures for all cells, run stats
+      # use tryCatch to collect warning messages
+      xtab <- tryCatch(CrossTable(bw_mat, chisq = T, fisher = T, expected = T),
+               warning = function(w) return(list(CrossTable(bw_mat, chisq = T, fisher = T, expected = T), w)))
+      rr <- rr_from_df(bw_df, "Stop & Search")
+      results_df <- data.frame("la" = la,
+                           "county" = county,
+                           "region" = region,
+                           "country" = country,
+                           "force" = force,
+                           "black_stopped" = temp_df["Black", "stopped"],
+                           "black_not_stopped" = temp_df["Black", "not_stopped"],
+                           "black_population" = temp_df["Black", "pop"],
+                           "black_stop_rate" = temp_df["Black", "percentage"],
+                           "white_stopped" = temp_df["White", "stopped"],
+                           "white_not_stopped" = temp_df["White", "not_stopped"],
+                           "white_population" = temp_df["White", "pop"],
+                           "white_stop_rate" = temp_df["White", "percentage"],
+                           "or" = ifelse(is.list(xtab[[1]]), 
+                                         xtab[[1]][["fisher.ts"]][["estimate"]][["odds ratio"]],
+                                         xtab[["fisher.ts"]][["estimate"]][["odds ratio"]]), 
+                           "or_ci_low" = ifelse(is.list(xtab[[1]]),
+                                                xtab[[1]][["fisher.ts"]][["conf.int"]][1],
+                                                xtab[["fisher.ts"]][["conf.int"]][1]),
+                           "or_ci_upp" = ifelse(is.list(xtab[[1]]),
+                                                xtab[[1]][["fisher.ts"]][["conf.int"]][2],
+                                                xtab[["fisher.ts"]][["conf.int"]][2]),
+                           "rr" = rr$rr,
+                           "rr_ci_low" = rr$ci_low,
+                           "rr_ci_upp" = rr$ci_upp,
+                           "warning" = ifelse(is.list(xtab[[1]]), xtab[[2]][["message"]], NA))
+      
+      all_mats <- all_mats + bw_mat
+      count <- count + 1 # increase count of areas for which stats have been acquired
+      
+    }
+    else{ # if there are missing values, don't run stats but still add frequency data
+      results_df <- data.frame("la" = la,
+                     "county" = county,
+                     "region" = region,
+                     "country" = country,
+                     "force" = force,
+                     "black_stopped" = temp_df["Black", "stopped"],
+                     "black_not_stopped" = temp_df["Black", "not_stopped"],
+                     "black_population" = temp_df["Black", "pop"],
+                     "black_stop_rate" = temp_df["Black", "percentage"],
+                     "white_stopped" = temp_df["White", "stopped"],
+                     "white_not_stopped" = temp_df["White", "not_stopped"],
+                     "white_population" = temp_df["White", "pop"],
+                     "white_stop_rate" = temp_df["White", "percentage"],
+                     "or" = NA, 
+                     "or_ci_low" = NA,
+                     "or_ci_upp" = NA,
+                     "rr" = NA,
+                     "rr_ci_low" = NA,
+                     "rr_ci_upp" = NA,
+                     "warning" = NA)
+    }
+
+  }
+  # if there is not data for both black and white, and/or there are missing values
+  else{
+    results_df <- data.frame("la" = la,
+                         "county" = county,
+                         "region" = region,
+                         "country" = country,
+                         "force" = force,
+                         "black_stopped" = NA,
+                         "black_not_stopped" = NA,
+                         "black_population" = NA,
+                         "black_stop_rate" = NA,
+                         "white_stopped" = NA,
+                         "white_not_stopped" = NA,
+                         "white_population" = NA,
+                         "white_stop_rate" = NA,
+                         "or" = NA, 
+                         "or_ci_low" = NA,
+                         "or_ci_upp" = NA,
+                         "rr" = NA,
+                         "rr_ci_low" = NA,
+                         "rr_ci_upp" = NA,
+                         "warning" = NA)
+  }
+
+  
+  all_results <- rbind(all_results, results_df) # add results to all results
+  all_dfs <- as.data.frame(all_mats)
+  cat("\014")
+  print(paste0(i, " of ", length(las), " complete (", round(100 * (i / length(las)),2 ), "%)"))
+}
+```
+
+
+The table below provides the frequency of stops and population estimates for Black and White people for each of the 143 Local Authority Districts LADs) analysed. It also presents calculated odds ratios and relative risk ratios, which describe the relationship between the rate at which Black people are stopped and the rate at which White people are stopped. Values above 1 indicate that Black people are more likely to be stopped than White people, values below 1 indicate that Black people are less likely to be stopped than White people, and a value of exactly 1 indicates that Black people are just as likely to be stopped as White people. The table is ordered according to the size of the odds/relative risk ratio. This means that the LADs with the greatest disparity in stops between Black and White people are presented first.
+
+```{r include = TRUE}
+# select just LADs for which stats have been calculated
+retrieved_stats <- subset(all_results, !is.na(all_results$or))
+
+# order results from highest disparity to lowest
+retrieved_stats <- retrieved_stats[order(retrieved_stats$rr, decreasing = T),]
+
+# round to 2 decimal places
+table_stats <- retrieved_stats %>%
+  mutate_if(is.numeric, ~round(.,2))
+
+DT::datatable(table_stats, rownames = FALSE,
+              caption = "Stop and Search disparities by Local Authority District")
+```
+
+
+# Overall disparity
+
+The statistics below present the overall disparity averaged across all 143 Local Authority Districts analysed. Results indicate that, overall, Black people are 5.6 times more likely to be stopped than White people.
+
+```{r include = TRUE}
+xtab_all_las <- CrossTable(all_mats, chisq = T, fisher = T, expected = T)
+rr_all_las <- rr_from_df(all_dfs, "stop_search_all")
+rr_all_las %>%
+  kable() %>%
+  kable_styling()
+```
+
+```{r}
+count_stats_black_greater <- sum(retrieved_stats$or_ci_low > 1)
+count_stats_black_not_greater <- nrow(retrieved_stats) - sum(retrieved_stats$or_ci_low > 1)
+count_stats_black_less <- sum(retrieved_stats$or_ci_upp < 1)
+
+perc_black_greater <- 100 * (count_stats_black_greater / nrow(retrieved_stats))
+perc_black_not_greater <- 100 * (count_stats_black_not_greater / nrow(retrieved_stats))
+perc_black_less <- 100 * (count_stats_black_less / nrow(retrieved_stats))
+
+sum(perc_black_greater, perc_black_not_greater)
+
+```
+
+```{r}
+la <- "Brighton and Hove"
+
+b_and_h <- subset(subset_df, la_name == la)
+
+temp_df <- b_and_h %>%
+  group_by(ethnicity) %>%
+  summarise(
+    stopped = n()
+  ) %>%
+  mutate(
+    pop = c(as.numeric(population_ests[which(population_ests$LAD == la), "White"]), 
+            as.numeric(population_ests[which(population_ests$LAD == la), "Black"])),
+    percentage = 100 * (stopped/pop),
+    not_stopped = pop - stopped
+  ) %>%
+  as.data.frame()
+
+row.names(temp_df) <- temp_df$ethnicity
+
+black <- data.frame("Black" = c("stopped" = temp_df["Black", "stopped"], "not_stopped" = temp_df["Black", "not_stopped"]))
+
+white <- data.frame("White" = c("stopped" = temp_df["White", "stopped"], "not_stopped" = temp_df["White", "not_stopped"]))
+
+bw_mat <- as.matrix(cbind(black, white)) # matrix for crosstable
+bw_df <- as.data.frame(bw_mat) # df for custom rr function
+
+xtab_sussex <- CrossTable(bw_mat, chisq = T, fisher = T, expected = T)
+
+rr_sussex <- rr_from_df(bw_df, "Stop & Search")
+
+rr_sussex
+```
+
