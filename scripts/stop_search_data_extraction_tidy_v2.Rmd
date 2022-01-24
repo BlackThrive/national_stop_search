@@ -317,7 +317,7 @@ la_search_police_api <- function(coord_list,
     
     country <- coord_list[[h]][["country"]] # country name
     
-    force <- coord_list[[j]][["force"]]
+    force <- coord_list[[h]][["force"]]
     
     # get most recent update if most_recent data not specified
     if(is.null(most_recent_month) || is.null(most_recent_year)){ 
@@ -483,7 +483,8 @@ la_search_police_api <- function(coord_list,
       select(index, la_name, la_code, county, region, country, everything()) %>%
       relocate(location.longitude, .before = location.latitude) %>% # put long next to lat
       relocate(date, .after = datetime) %>% 
-      relocate(time, .after = date)
+      relocate(time, .after = date) %>%
+      subset(., select = -c(datetime)) # get rid of redundant datetime column
 
     overall_output <- bind_rows(overall_output, area_output)
     
@@ -493,7 +494,8 @@ la_search_police_api <- function(coord_list,
     # that there is a backup in case function breaks. Saves to same folder as
     # script
     save_progress <- list(result = overall_output,
-                          missing_entries = no_entries_df)
+                          missing_entries = no_entries_df,
+                          last_area_acquired = h)
     save(save_progress, file = "./save_progress.Rdata")
   } # LA loop (h) ends
   
@@ -522,11 +524,11 @@ la_search_police_api <- function(coord_list,
 # # for testing, select just one force (in this case Cleveland)
 indexes <- c()
 for(i in 1:length(ordered_coords)){
-  if(ordered_coords[[i]][["force"]] == "Cleveland"){
+  if(ordered_coords[[i]][["force"]] == "Sussex"){
     indexes <- append(indexes, i)
   }
 }
-just_cleveland <- ordered_coords[indexes]
+#just_sussex <- ordered_coords[indexes]
 ```
 
 ## Run function
@@ -537,16 +539,34 @@ just_cleveland <- ordered_coords[indexes]
 # known_missing_entries <- data[[2]]
 # ordered_coords_missing_removed <- within(ordered_coords, rm(list = known_missing_entries$Name))
 
+test_coords <- ordered_coords[1:50]
 
-test_coords <- ordered_coords[1:3]
-data <- la_search_police_api(just_cleveland, back_to_month = 12, back_to_year = 2018)
+data <- la_search_police_api(ordered_coords, back_to_month = 12, back_to_year = 2018)
 
-df <- data[[1]] # extract the results data frame
-df <- df[order(df$date,df$time),]
+#sussex_df <-  sussex_data[[1]] # extract the results data frame
+#df <- df[order(df$date,df$time),]
 # save R object
 #save(data, file = "../data/stop_search_all_las_12_months_to_oct_21.Rdata")
 ```
 
+
+```{r}
+# check oldest update.
+# library(rjson)
+# dates <- rjson::fromJSON(file = "../data/crimes-street-dates.json")
+# 
+# date_df <- data.frame("date" = rep(NA, length(dates)))
+# for(i in 1:length(dates)){
+#   dates[[i]][["date"]] <- paste0(dates[[i]][["date"]],"-01")
+#   date_df$date[i] <- dates[[i]][["date"]]
+# }
+# 
+# date_df$date <- as.Date(date_df$date)
+# 
+# min(date_df$date)
+# max(date_df$date)
+```
+Oldest update is December 2018
 
 ```{r}
 # quick load of data collected from above function
