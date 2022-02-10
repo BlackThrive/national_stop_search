@@ -1,5 +1,5 @@
 
-<img src="../images/btg_logo.png" alt="Logo" width="140" height="140" align="center" />
+<img src="../images/btg_logo.png" alt="Logo" width="140" height="140" align="center"/>
 
 # Police stop and search data extraction
 
@@ -7,7 +7,14 @@
 
 ## January 2022
 
-# Overview
+# Contents
+
+1.  [Overview](#overview)
+2.  [Packages](#packages)
+3.  [Coordinates](#coords)
+4.  [Extraction function](#extraction)
+
+# Overview <a name = "overview"></a>
 
 This document provides a step by step explanation of a custom R function
 that retrieves stop and search data for a specified set of Local
@@ -26,7 +33,7 @@ The extraction involves two key steps:
     for stop and search records within each LAD over the specified time
     period.
 
-# Packages
+# Packages <a name = "packages"></a>
 
 ``` r
 packages <- c('tidyverse',
@@ -36,14 +43,16 @@ packages <- c('tidyverse',
               'data.table', # for unlisting
               'rgdal', # for geopackage
               'sf', # for geopackage
-              'chron' # for dealing with time values
+              'chron', # for dealing with time values
+              'mapview', # for saving leaflet maps
+              'knitr'
 )
 pkg_notinstall <- packages[!(packages %in% installed.packages()[,"Package"])]
 lapply(pkg_notinstall, install.packages, dependencies = TRUE)
 lapply(packages, library, character.only = TRUE)
 ```
 
-# Coordinates
+# Coordinates <a name = "coords"></a>
 
 The first part of this script integrates coordinates specifying Local
 Authority District (LAD) boundaries with county, region, country and
@@ -282,20 +291,26 @@ for(i in 1:length(sc_coords[["coords"]])){
   all_coords <- rbind(all_coords, iteration_coords, c(NA, NA))
 }
 
-leaflet(as.matrix(all_coords)) %>% 
+map <- leaflet(as.matrix(all_coords)) %>% 
   addPolygons(weight = 0.5) %>% 
   addTiles()
+
+mapshot(map, file = "../images/cambridge_map.png")
 ```
 
-![](stop_search_data_extraction_tidy_v3_files/figure-gfm/unnamed-chunk-7-1.png)<!-- -->
+``` r
+knitr::include_graphics("../images/cambridge_map.png")
+```
 
-To avoid repeated retrieval of Cambridge stops, its coordinates were
-removed from the South Cambridgeshire element. In this way, stops could
-be retrieved independently for Cambridge and South Cambridgeshire. It
-should be noted that in analyses involving aggregating over LADs, this
-overlap must be accounted for. This can be done by removing the
-Cambridge stops from the dataset and keeping the broader South
-Cambridgeshire stops.
+<img src="../images/cambridge_map.png" style="display: block; margin: auto;" />
+
+To avoid repeated retrieval of Cambridge stops (dark blue area above),
+its coordinates were removed from the South Cambridgeshire element
+(light blue above). In this way, stops could be retrieved independently
+for Cambridge and South Cambridgeshire. It should be noted that in
+analyses involving aggregating over LADs, this overlap must be accounted
+for. This can be done by removing the Cambridge stops from the dataset
+and keeping the broader South Cambridgeshire stops.
 
 ``` r
 # remove repeat cambridge within south cambridgeshire
@@ -308,7 +323,7 @@ ordered_coords[["South Cambridgeshire"]][["coords"]] <- ordered_coords[["South C
 # load("../data/ordered_coords.Rdata")
 ```
 
-# Extraction function
+# Extraction function <a name = "extraction"></a>
 
 This part of the script specifies and runs the function used to extract
 data from the Police API. It takes the formatted coordinates acquired
