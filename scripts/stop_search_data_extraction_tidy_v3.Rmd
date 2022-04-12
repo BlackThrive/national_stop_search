@@ -555,34 +555,34 @@ la_search_police_api <- function(coord_list,
     #area_output$time <- chron(times. =  df$time, format = c(times = "hh:mm:ss"))
     
     # move index and location data to front of df
-    area_output <- area_output %>%
-      select(index, 
-             la_name, 
-             la_code, 
-             county, 
-             region, 
-             country, 
-             force, 
-             date,
-             time,
-             age_range, 
-             gender, 
-             self_defined_ethnicity, 
-             officer_defined_ethnicity, 
-             object_of_search,
-             legislation,
-             outcome,
-             outcome_linked_to_object_of_search,
-             type,
-             involved_person,
-             removal_of_more_than_outer_clothing,
-             operation,
-             location.longitude,
-             location.latitude,
-             location.street.id,
-             location.street.name,
-             everything()) %>%
-      subset(., select = -c(datetime, outcome_object.id, outcome_object.name)) # get rid of redundant columns
+    #area_output <- area_output %>%
+     # select(index, 
+    #        la_name, 
+    #        la_code, 
+    #        county, 
+    #        region, 
+    #        country, 
+    #        force, 
+    #        date,
+    #        time,
+    #        age_range, 
+    #        gender, 
+    #        self_defined_ethnicity, 
+    #        officer_defined_ethnicity, 
+    #        object_of_search,
+    #        legislation,
+    #        outcome,
+    #        outcome_linked_to_object_of_search,
+    #        type,
+    #        involved_person,
+    #        #removal_of_more_than_outer_clothing,
+    #        operation,
+    #        location.longitude,
+    #        location.latitude,
+    #        location.street.id,
+    #        location.street.name,
+    #        everything()) %>%
+    # subset(., select = -c(datetime, outcome_object.id, outcome_object.name)) # get rid of redundant columns
 
     overall_output <- bind_rows(overall_output, area_output)
     
@@ -616,7 +616,7 @@ la_search_police_api <- function(coord_list,
 ## Run function
 
 ```{r eval = FALSE}
-
+#full extraction may take a long time depending on the computing power of your machine
 data <- la_search_police_api(ordered_coords, back_to_month = 1, back_to_year = 2019)
 ```
 
