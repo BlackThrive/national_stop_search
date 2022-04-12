@@ -72,6 +72,12 @@ The first part of this script integrates coordinates specifying Local Authority 
 ## Read data
 
 ```{r}
+# Unzip data
+files <- list.files(path="../data/", pattern=".zip$")
+for (i in files) {
+  unzip(paste0("../data/",i), exdir= "../data")
+}
+
 # read boundary data
 coords <- geojsonR::FROM_GeoJson("../data/Local_Authority_Districts_(December_2021)_UK_BFE.geojson")
 
@@ -90,29 +96,6 @@ forces_df <- read_csv("../data/la_to_force_2020.csv")
 forces_df <- forces_df[!duplicated(forces_df$LAD20NM),] %>%
   select(-c(4:5))
 
-```
-
-```{r}
-# check that NI LAs are in this coord set
-
-# targets <- c("Causeway Coast and Glens",
-#              "Derry City and Strabane",
-#              "Fermanagh and Omagh",
-#              "Mid Ulster",
-#              "Mid and East Antrim",
-#              "Antrim and Newtownabbey",
-#              "Armagh City, Banbridge and Craigavon",
-#              "Lisburn and Castlereagh",
-#              "Belfast",
-#              "Ards and North Down",
-#              "Newry, Mourne and Down")
-# count <- 0
-# for(i in 1:374){
-#   if(!is.na(match(coords[["features"]][[i]][["properties"]][["LAD21NM"]], targets))){
-#     count <- count + 1
-#   }
-# }
-# count
 ```
 
 ## Format coordinates
@@ -287,14 +270,9 @@ map <- leaflet(as.matrix(all_coords)) %>%
   addPolygons(weight = 0.5) %>% 
   addTiles()
 
-mapshot(map, file = "../images/cambridge_map.png")
+map
 
 ```
-
-```{r results = TRUE, fig.align='center'}
-knitr::include_graphics("../images/cambridge_map.png")
-```
-
 To avoid repeated retrieval of Cambridge stops (dark blue area above), its coordinates were removed from the South Cambridgeshire element (light blue above). In this way, stops could be retrieved independently for Cambridge and South Cambridgeshire. It should be noted that in analyses involving aggregating over LADs, this overlap must be accounted for. This can be done by removing the Cambridge stops from the dataset and keeping the broader South Cambridgeshire stops.
 
 ```{r}
@@ -638,6 +616,7 @@ la_search_police_api <- function(coord_list,
 ## Run function
 
 ```{r eval = FALSE}
+
 data <- la_search_police_api(ordered_coords, back_to_month = 1, back_to_year = 2019)
 ```
 
